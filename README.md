@@ -23,7 +23,7 @@ hifi-wifi is a network optimization tool for Linux systems, specifically targeti
 Clone the repository and run the installer:
 
 ```bash
-git clone https://github.com/yourusername/hifi-wifi.git
+git clone https://github.com/doughty247/hifi-wifi.git
 cd hifi-wifi
 chmod +x install.sh
 sudo ./install.sh
