@@ -16,8 +16,33 @@ fi
 # Check for existing installation and cleanup
 if command -v hifi-wifi &>/dev/null; then
     echo "Detected existing installation. Cleaning up old patches..."
+    
+    # Backup network connections to prevent data loss during revert
+    echo "Backing up network connections..."
+    NM_BACKUP_DIR=$(mktemp -d)
+    sudo cp -r /etc/NetworkManager/system-connections/. "$NM_BACKUP_DIR/" 2>/dev/null || true
+    
     # Try to revert patches using the OLD version to ensure clean state
     sudo hifi-wifi --revert --quiet || echo "Warning: Failed to revert old patches. Proceeding anyway."
+    
+    # Restore network connections
+    echo "Restoring network connections..."
+    sudo cp -r "$NM_BACKUP_DIR/"* /etc/NetworkManager/system-connections/ 2>/dev/null || true
+    sudo chmod 600 /etc/NetworkManager/system-connections/* 2>/dev/null || true
+    sudo nmcli connection reload || true
+    
+    # Force reconnection to pick up restored profiles
+    echo "Triggering Wi-Fi reconnection..."
+    sudo nmcli radio wifi off 2>/dev/null || true
+    sleep 1
+    sudo nmcli radio wifi on 2>/dev/null || true
+    
+    rm -rf "$NM_BACKUP_DIR"
+    
+    # Re-disable read-only if the revert script re-enabled it
+    if [ "$IS_STEAMOS" = true ]; then
+        sudo steamos-readonly disable
+    fi
 fi
 
 echo "Installing hifi-wifi..."

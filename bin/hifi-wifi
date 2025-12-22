@@ -351,14 +351,14 @@ if [[ $QUIET -eq 0 ]]; then
             echo ""
             log_warning "A reboot is recommended"
             echo ""
-            read -p "Reboot now to apply all changes? [y/N]: " -n 1 -r
+            read -p "Reboot now to apply all changes? [Y/n]: " -n 1 -r
             echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                log_info "Skipping reboot. Reboot later with: sudo systemctl reboot"
+            else
                 log_info "Rebooting in 5 seconds... (Ctrl+C to cancel)"
                 sleep 5
                 systemctl reboot
-            else
-                log_info "Skipping reboot. Reboot later with: sudo systemctl reboot"
             fi
         fi
     elif [[ $REVERT -eq 1 ]]; then
@@ -367,14 +367,14 @@ if [[ $QUIET -eq 0 ]]; then
             echo ""
             log_warning "A reboot is recommended"
             echo ""
-            read -p "Reboot now to fully revert changes? [y/N]: " -n 1 -r
+            read -p "Reboot now to fully revert changes? [Y/n]: " -n 1 -r
             echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                log_info "Skipping reboot. Reboot later with: sudo systemctl reboot"
+            else
                 log_info "Rebooting in 5 seconds... (Ctrl+C to cancel)"
                 sleep 5
                 systemctl reboot
-            else
-                log_info "Skipping reboot. Reboot later with: sudo systemctl reboot"
             fi
         fi
     fi
