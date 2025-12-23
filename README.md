@@ -20,6 +20,16 @@ hifi-wifi is a network optimization tool for Linux systems, specifically targeti
 
 ## Installation
 
+### SteamOS Users
+If you are running SteamOS (Steam Deck), you may need to initialize the pacman keyring before installation if you haven't done so previously:
+
+```bash
+sudo pacman-key --init
+sudo pacman-key --populate holo
+```
+
+### General Installation
+
 Clone the repository and run the installer:
 
 ```bash
