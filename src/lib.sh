@@ -567,6 +567,9 @@ EOF
     # Enable iwd to start on boot
     systemctl enable iwd.service 2>/dev/null || true
 
+    # Give iwd a moment to fully initialize D-Bus interfaces before NetworkManager restarts
+    sleep 2
+
     log_success "Switched to iwd backend. NetworkManager restart required."
 }
 
