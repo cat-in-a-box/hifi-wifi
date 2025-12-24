@@ -55,8 +55,22 @@ if command -v hifi-wifi &>/dev/null; then
     if [[ "$IS_WIFI" == "true" ]]; then
         echo "Triggering Wi-Fi reconnection..."
         sudo nmcli radio wifi off 2>/dev/null || true
-        sleep 1
+        sleep 2
         sudo nmcli radio wifi on 2>/dev/null || true
+        sleep 3
+        
+        # Explicitly bring up the saved connection (SteamOS doesn't auto-reconnect)
+        if [[ -n "$CURRENT_CONNECTION" ]]; then
+            echo "Reconnecting to $CURRENT_CONNECTION..."
+            sudo nmcli connection up "$CURRENT_CONNECTION" 2>/dev/null || true
+        else
+            # Try to connect to any available known network
+            SAVED_WIFI=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep ":802-11-wireless" | cut -d: -f1 | head -1)
+            if [[ -n "$SAVED_WIFI" ]]; then
+                echo "Reconnecting to $SAVED_WIFI..."
+                sudo nmcli connection up "$SAVED_WIFI" 2>/dev/null || true
+            fi
+        fi
     else
         echo "Reloading network connections..."
         sudo nmcli connection reload
