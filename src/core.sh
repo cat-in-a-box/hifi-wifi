@@ -499,8 +499,8 @@ function revert_patches() {
       
       # Only remove Wi-Fi connections to ensure clean state for wpa_supplicant
       log_info "Cleaning up iwd connection profiles..."
-      nmcli -t -f UUID,TYPE connection show | { grep ":802-11-wireless" || true; } | cut -d: -f1 | while read -r uuid; do
-          nmcli connection delete "$uuid" 2>/dev/null || true
+      timeout 10 nmcli -t -f UUID,TYPE connection show | { grep ":802-11-wireless" || true; } | cut -d: -f1 | while read -r uuid; do
+          timeout 5 nmcli connection delete "$uuid" 2>/dev/null || true
       done
       
       log_info "Restarting NetworkManager..."

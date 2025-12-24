@@ -22,8 +22,13 @@ if command -v hifi-wifi &>/dev/null; then
     NM_BACKUP_DIR=$(mktemp -d)
     sudo cp -r /etc/NetworkManager/system-connections/. "$NM_BACKUP_DIR/" 2>/dev/null || true
     
-    # Try to revert patches using the OLD version to ensure clean state
-    sudo hifi-wifi --revert --quiet || echo "Warning: Failed to revert old patches. Proceeding anyway."
+    # Try to revert patches using the LOCAL version to ensure we use the latest fixes
+    # (The installed version might be broken or hanging)
+    if [[ -f "./bin/hifi-wifi" ]]; then
+        sudo ./bin/hifi-wifi --revert --quiet || echo "Warning: Failed to revert old patches. Proceeding anyway."
+    else
+        sudo hifi-wifi --revert --quiet || echo "Warning: Failed to revert old patches. Proceeding anyway."
+    fi
     
     # Restore network connections
     echo "Restoring network connections..."
