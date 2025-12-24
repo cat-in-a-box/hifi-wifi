@@ -440,9 +440,24 @@ EOF
                   if nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep -q "^wlan.*:connected\|^wlp.*:connected"; then
                       connected=true
                       log_success "Wi-Fi reconnected successfully"
-                      # Give the network extra time to fully stabilize (DHCP, routing, DNS)
-                      log_info "Allowing network to stabilize..."
-                      sleep 5
+                      
+                      # Verify actual connectivity to ensure network is fully operational
+                      log_info "Verifying internet connectivity..."
+                      local ping_success=false
+                      local ping_wait=0
+                      while [[ $ping_wait -lt 15 ]]; do
+                          if ping -c 1 -W 1 8.8.8.8 &>/dev/null; then
+                              ping_success=true
+                              log_success "Internet connectivity verified"
+                              break
+                          fi
+                          sleep 1
+                          ping_wait=$((ping_wait + 1))
+                      done
+                      
+                      if [[ "$ping_success" = false ]]; then
+                          log_warning "Internet check timed out, but Wi-Fi is connected. Proceeding..."
+                      fi
                       break
                   fi
               fi
