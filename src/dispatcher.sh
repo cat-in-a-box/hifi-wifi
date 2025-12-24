@@ -18,12 +18,12 @@ mkdir -p "$PROFILES_DIR" 2>/dev/null
 # Get current SSID or Connection Name (for Ethernet)
 get_ssid() {
     # Try Wi-Fi SSID first
-    local ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes' | cut -d: -f2 | head -1)
+    local ssid=$(timeout 2 nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes' | cut -d: -f2 | head -1)
     if [[ -n "$ssid" ]]; then
         echo "$ssid"
     else
         # Fallback to connection name (works for Ethernet)
-        nmcli -t -f NAME,DEVICE connection show --active | grep ":$INTERFACE" | cut -d: -f1 | head -1
+        timeout 2 nmcli -t -f NAME,DEVICE connection show --active | grep ":$INTERFACE" | cut -d: -f1 | head -1
     fi
 }
 
