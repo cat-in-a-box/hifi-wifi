@@ -36,12 +36,8 @@ Bug Fixes:
 * Network connection profiles are now backed up before revert and restored after
 * Ensures automatic reconnection to the same network after `--revert`
 
-Installation (Testing Branch):
-```bash
-git clone -b testing https://github.com/doughty247/hifi-wifi.git
-cd hifi-wifi
-sudo ./install.sh
-```
+Known Issues:
+* **Power Mode Stuck in Performance**: Wi-Fi power mode may remain stuck in performance mode even when on battery. Investigating for future release.
 
 ---
 
