@@ -1,6 +1,6 @@
 # hifi-wifi
 
-hifi-wifi is a network optimization tool for Linux systems, specifically targeting SteamOS and Bazzite. It configures the CAKE queue discipline to mitigate bufferbloat and manages Wi-Fi power save modes based on power source.
+hifi-wifi is a network optimization tool specifically targeting SteamOS and Bazzite. It configures the CAKE queue discipline to mitigate bufferbloat and manages Wi-Fi power save modes based on power source.
 
 ## Features
 
@@ -110,8 +110,7 @@ sudo hifi-wifi --apply --no-iwd
 
 ## Supported Systems
 
-*   **Primary Targets**: Bazzite, SteamOS (Steam Deck LCD & OLED)
-*   **Compatible**: Fedora, Debian, Ubuntu, Arch Linux (and most NetworkManager-based distros)
+Bazzite, SteamOS (Steam Deck LCD & OLED)
 
 ## Reporting Issues
 
