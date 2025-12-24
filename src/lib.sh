@@ -498,7 +498,17 @@ EOF
 
 function enable_iwd() {
     log_info "Checking for iwd..."
-    if ! command -v iwd &>/dev/null; then
+    
+    # Check for iwd presence
+    local iwd_installed=false
+    if command -v iwd &>/dev/null || \
+       [[ -x /usr/libexec/iwd ]] || \
+       [[ -x /usr/lib/iwd/iwd ]] || \
+       systemctl list-unit-files iwd.service &>/dev/null; then
+        iwd_installed=true
+    fi
+
+    if [ "$iwd_installed" = false ]; then
         log_warning "iwd not found. Installing..."
         install_dependencies "iwd" || {
             log_error "Could not install iwd. Skipping backend switch."
@@ -506,6 +516,41 @@ function enable_iwd() {
         }
     fi
 
+    log_info "Testing iwd compatibility with your hardware..."
+    
+    # Start iwd temporarily to test
+    systemctl start iwd.service 2>/dev/null
+    
+    # Wait for service to stabilize and check if it actually started
+    sleep 3
+    if ! systemctl is-active --quiet iwd.service; then
+        log_error "iwd service failed to start. Your hardware may not be supported."
+        log_info "Keeping wpa_supplicant as backend."
+        return 1
+    fi
+    
+    # Check if iwd can see the Wi-Fi adapter via D-Bus (more reliable than iwctl)
+    local iwd_devices_found=false
+    if command -v busctl &>/dev/null; then
+        if busctl tree net.connman.iwd 2>/dev/null | grep -q "net/connman/iwd"; then
+            iwd_devices_found=true
+        fi
+    else
+        # Fallback: check sysfs for phy devices
+        if ls /sys/class/ieee80211/phy* &>/dev/null; then
+            iwd_devices_found=true
+        fi
+    fi
+    
+    if [ "$iwd_devices_found" = false ]; then
+        log_error "iwd started but cannot detect your Wi-Fi hardware."
+        log_warning "This could indicate driver incompatibility."
+        log_info "Keeping wpa_supplicant as backend for safety."
+        systemctl stop iwd.service 2>/dev/null
+        return 1
+    fi
+
+    log_success "iwd successfully detected your Wi-Fi hardware!"
     log_info "Switching NetworkManager backend to iwd..."
     
     # Create configuration to switch backend
@@ -519,8 +564,8 @@ EOF
     systemctl mask wpa_supplicant.service 2>/dev/null || true
     systemctl stop wpa_supplicant.service 2>/dev/null || true
 
-    # Enable and start iwd
-    systemctl enable --now iwd.service 2>/dev/null || true
+    # Enable iwd to start on boot
+    systemctl enable iwd.service 2>/dev/null || true
 
     log_success "Switched to iwd backend. NetworkManager restart required."
 }
