@@ -30,12 +30,12 @@ sudo pacman-key --populate holo
 
 ### General Installation
 
-Clone the repository and run the installer:
+Clone the repository and install the latest stable release:
 
 ```bash
 git clone https://github.com/doughty247/hifi-wifi.git
 cd hifi-wifi
-chmod +x install.sh
+git checkout $(git describe --tags --abbrev=0)
 sudo ./install.sh
 ```
 

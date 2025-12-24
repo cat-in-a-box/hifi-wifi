@@ -374,7 +374,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'tc qdisc del dev %I root 2>/dev/null || true; tc qdisc add dev %I root cake bandwidth ${saved_bandwidth} diffserv4 dual-dsthost nat wash ack-filter'
-ExecStop=/usr/sbin/tc qdisc del dev %I root
+ExecStop=/bin/sh -c 'test -d /sys/class/net/%I && tc qdisc del dev %I root 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
