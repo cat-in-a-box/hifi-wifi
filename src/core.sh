@@ -71,6 +71,11 @@ function apply_patches() {
   fi
   
   log_info "Using interface: $ifc"
+  
+  # Abort early if network is busy - accurate bandwidth detection requires idle network
+  if ! check_network_idle_or_abort "$ifc"; then
+    return 1
+  fi
 
   if [[ ${DRY_RUN:-0} -eq 1 ]]; then
     log_info "[DRY-RUN] Would apply the following changes:"
@@ -302,47 +307,29 @@ EOF
     else
       log_info "No profile found for $current_ssid, creating new profile..."
       
-      log_info "Checking network activity before bandwidth detection..."
-      local rx1 tx1 rx2 tx2 rx_rate tx_rate total_rate
-      rx1=$(cat "/sys/class/net/$ifc/statistics/rx_bytes" 2>/dev/null || echo 0)
-      tx1=$(cat "/sys/class/net/$ifc/statistics/tx_bytes" 2>/dev/null || echo 0)
-      sleep 2
-      rx2=$(cat "/sys/class/net/$ifc/statistics/rx_bytes" 2>/dev/null || echo 0)
-      tx2=$(cat "/sys/class/net/$ifc/statistics/tx_bytes" 2>/dev/null || echo 0)
-      rx_rate=$(( (rx2 - rx1) / 2048 ))
-      tx_rate=$(( (tx2 - tx1) / 2048 ))
-      total_rate=$((rx_rate + tx_rate))
+      log_info "Detecting optimal bandwidth settings..."
+      local link_speed
+      local overhead_percent=85
       
-      if [[ $total_rate -gt 500 ]]; then
-        log_warning "Network is BUSY (${total_rate} KB/s) - skipping bandwidth detection"
-        log_warning "Using safe default: ${bandwidth}"
-        log_warning "Profile will be created on next idle connection"
-      else
-        log_info "Network is IDLE (${total_rate} KB/s) - safe to detect bandwidth"
-        
-        local link_speed
-        local overhead_percent=85
-        
-        link_speed=$(iw dev "$ifc" link 2>/dev/null | grep -oP 'tx bitrate: \K[0-9]+' | head -1 || true)
-        
-        if [[ -z "$link_speed" ]]; then
-            link_speed=$(ethtool "$ifc" 2>/dev/null | grep -oP 'Speed: \K[0-9]+' | head -1 || true)
-            if [[ -n "$link_speed" ]]; then
-                overhead_percent=95
-                log_info "Ethernet detected, using aggressive ${overhead_percent}% limit"
-            fi
-        fi
-        
-        if [[ -n "$link_speed" && $link_speed -gt 0 ]]; then
-          local cake_limit=$((link_speed * overhead_percent / 100))
-          bandwidth="${cake_limit}mbit"
-          log_info "Detected link speed: ${link_speed}Mbit/s, setting CAKE to ${cake_limit}Mbit/s (${overhead_percent}%)"
-        else
-          log_warning "Could not detect link speed, using default ${bandwidth}"
-        fi
-        
-        save_network_profile "$current_ssid" "$bandwidth" "auto"
+      link_speed=$(iw dev "$ifc" link 2>/dev/null | grep -oP 'tx bitrate: \K[0-9]+' | head -1 || true)
+      
+      if [[ -z "$link_speed" ]]; then
+          link_speed=$(ethtool "$ifc" 2>/dev/null | grep -oP 'Speed: \K[0-9]+' | head -1 || true)
+          if [[ -n "$link_speed" ]]; then
+              overhead_percent=95
+              log_info "Ethernet detected, using aggressive ${overhead_percent}% limit"
+          fi
       fi
+      
+      if [[ -n "$link_speed" && $link_speed -gt 0 ]]; then
+        local cake_limit=$((link_speed * overhead_percent / 100))
+        bandwidth="${cake_limit}mbit"
+        log_info "Detected link speed: ${link_speed}Mbit/s, setting CAKE to ${cake_limit}Mbit/s (${overhead_percent}%)"
+      else
+        log_warning "Could not detect link speed, using default ${bandwidth}"
+      fi
+      
+      save_network_profile "$current_ssid" "$bandwidth" "auto"
     fi
   else
     log_warning "No active network detected, using default bandwidth"

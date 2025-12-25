@@ -43,6 +43,57 @@ function log_error() {
     [[ ${NO_COLOR:-0} -eq 1 ]] && echo "[ERROR] $*" >&2 || echo -e "${RED}[ERROR]${NC} $*" >&2
 }
 
+# Check if network is idle, abort with clear message if busy
+function check_network_idle_or_abort() {
+  local ifc="$1"
+  local threshold_kbps=300  # Consider busy if >300 KB/s traffic
+  
+  log_info "Checking network activity..."
+  
+  local rx1 tx1 rx2 tx2 rx_rate tx_rate total_rate
+  rx1=$(cat "/sys/class/net/$ifc/statistics/rx_bytes" 2>/dev/null || echo 0)
+  tx1=$(cat "/sys/class/net/$ifc/statistics/tx_bytes" 2>/dev/null || echo 0)
+  sleep 2
+  rx2=$(cat "/sys/class/net/$ifc/statistics/rx_bytes" 2>/dev/null || echo 0)
+  tx2=$(cat "/sys/class/net/$ifc/statistics/tx_bytes" 2>/dev/null || echo 0)
+  
+  rx_rate=$(( (rx2 - rx1) / 2048 ))
+  tx_rate=$(( (tx2 - tx1) / 2048 ))
+  total_rate=$((rx_rate + tx_rate))
+  
+  if [[ $total_rate -gt $threshold_kbps ]]; then
+    log_error "Network activity detected (${total_rate} KB/s)"
+    log_error ""
+    log_error "Common causes:"
+    
+    # Check for common bandwidth-consuming processes
+    if pgrep -f "steam" >/dev/null 2>&1; then
+      log_error "  - Steam downloads (Steam is running)"
+    fi
+    if pgrep -f "apt-get|apt|dnf|pacman|zypper" >/dev/null 2>&1; then
+      log_error "  - System updates (package manager is running)"
+    fi
+    if pgrep -f "firefox|chrome|chromium" >/dev/null 2>&1; then
+      log_error "  - Browser downloads"
+    fi
+    
+    # Always show generic message if no specific processes found
+    if ! pgrep -f "steam|apt|dnf|firefox|chrome" >/dev/null 2>&1; then
+      log_error "  - Active downloads or updates"
+      log_error "  - Background system processes"
+    fi
+    
+    log_error ""
+    log_error "Please close applications and pause downloads, then retry."
+    log_error ""
+    
+    return 1
+  fi
+  
+  log_success "Network is idle (${total_rate} KB/s) - safe to proceed"
+  return 0
+}
+
 # Detect package manager and system type
 function detect_package_manager() {
     local distro=""

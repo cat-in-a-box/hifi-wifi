@@ -202,14 +202,9 @@ if true; then  # New profile creation block
     # Check if network is busy before bandwidth detection
     if ! is_network_idle "$INTERFACE"; then
         log "Network is BUSY (active downloads/uploads detected)"
-        log "Skipping bandwidth detection to avoid interference with ongoing transfers"
-        log "Will create profile on next idle connection to this network"
-        log "Using safe defaults for now: 200mbit, standard power mode"
-        
-        # Apply safe defaults without creating profile
-        tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
-        tc qdisc add dev "$INTERFACE" root cake bandwidth 200mbit diffserv4 dual-dsthost nat wash ack-filter 2>/dev/null || true
-        iw dev "$INTERFACE" set power_save off 2>/dev/null
+        log "Skipping profile creation to avoid inaccurate bandwidth detection"
+        log "Profile will be auto-created on next idle connection to this network"
+        # Don't apply any CAKE settings - let system use default qdisc temporarily
         exit 0
     fi
     
