@@ -1,8 +1,6 @@
-hifi-wifi v1.2.0 (Pre-release)
+hifi-wifi v1.2.0
 
 Critical stability release addressing SteamOS installation hangs, reboot issues, and network reconnection failures.
-
-⚠️ **Pre-release**: This version is in testing. Please report any issues.
 
 Bug Fixes:
 
