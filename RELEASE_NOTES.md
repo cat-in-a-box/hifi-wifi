@@ -36,6 +36,11 @@ Bug Fixes:
 * Network connection profiles are now backed up before revert and restored after
 * Ensures automatic reconnection to the same network after `--revert`
 
+**Directory Creation Fix**
+* Fixed "No such file or directory" errors on fresh installs ([#4](https://github.com/doughty247/hifi-wifi/issues/4))
+* State directories (`/var/lib/wifi_patch/networks`) now created during install
+* `apply_patches()` also ensures directories exist at runtime
+
 Known Issues:
 * **Power Mode Stuck in Performance**: Wi-Fi power mode may remain stuck in performance mode even when on battery. Investigating for future release.
 
