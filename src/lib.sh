@@ -159,6 +159,7 @@ function install_dependencies() {
         ["sysctl"]="procps-ng"
         ["iwd"]="iwd"
         ["speedtest-cli"]="speedtest-cli"
+        ["bc"]="bc"
     )
     
     local packages=()
@@ -239,7 +240,7 @@ function install_dependencies() {
 # Check for required commands
 function check_dependencies() {
     local missing_deps=()
-    local required_cmds=("ip" "nmcli" "iw" "tc" "ethtool" "sysctl")
+    local required_cmds=("ip" "nmcli" "iw" "tc" "ethtool" "sysctl" "bc")
     
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then

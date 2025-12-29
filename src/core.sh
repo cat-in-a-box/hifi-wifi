@@ -142,6 +142,70 @@ function detect_driver_category() {
     fi
 }
 
+# --- Latency Monitoring Functions (Ported from wifi-grader.sh) ---
+PING_PIDS=()
+TARGETS=("8.8.8.8" "1.1.1.1")
+
+function start_ping_monitor() {
+    local label="$1"
+    PING_PIDS=()
+    
+    # log_info "[$label] Starting latency monitor to: ${TARGETS[*]}"
+    
+    for target in "${TARGETS[@]}"; do
+        local safe_target=$(echo "$target" | tr . _)
+        # Run ping in background, redirecting output
+        # -i 0.2: Fast interval (5 packets/sec) for high resolution
+        ping -i 0.2 "$target" > "/tmp/ping_${label}_${safe_target}.txt" 2>&1 &
+        PING_PIDS+=($!)
+    done
+}
+
+function stop_ping_monitor() {
+    # Send SIGINT (Ctrl+C) to all pings to force them to print summary
+    for pid in "${PING_PIDS[@]}"; do
+        kill -2 $pid 2>/dev/null
+        wait $pid 2>/dev/null
+    done
+}
+
+function calc_stats() {
+    local label="$1"
+    local total_avg=0
+    local total_jitter=0
+    local count=0
+    
+    for target in "${TARGETS[@]}"; do
+        local safe_target=$(echo "$target" | tr . _)
+        local file="/tmp/ping_${label}_${safe_target}.txt"
+        
+        if [[ -f "$file" ]]; then
+            # Parse ping summary: rtt min/avg/max/mdev = 15.1/16.2/18.3/1.1 ms
+            local stats=$(grep "rtt" "$file" | tail -1)
+            local values=$(echo "$stats" | awk -F'=' '{print $2}' | awk '{print $1}')
+            
+            # Extract avg and mdev (jitter)
+            local avg=$(echo "$values" | cut -d'/' -f2)
+            local jitter=$(echo "$values" | cut -d'/' -f4)
+            
+            if [[ "$avg" =~ ^[0-9.]+$ ]]; then
+                total_avg=$(echo "$total_avg + $avg" | bc)
+                total_jitter=$(echo "$total_jitter + $jitter" | bc)
+                count=$((count + 1))
+            fi
+            rm -f "$file"
+        fi
+    done
+    
+    if [[ $count -gt 0 ]]; then
+        FINAL_AVG=$(echo "scale=1; $total_avg / $count" | bc)
+        FINAL_JITTER=$(echo "scale=1; $total_jitter / $count" | bc)
+    else
+        FINAL_AVG="0"
+        FINAL_JITTER="0"
+    fi
+}
+# -----------------------------------------------------------------
 
 function measure_bandwidth_speedtest() {
     local speedtest_cmd=""
@@ -173,6 +237,9 @@ function measure_bandwidth_speedtest() {
     
     log_info "Running speedtest (this may take 30-60 seconds)..."
     
+    # Start latency monitor to measure bufferbloat during download
+    start_ping_monitor "download"
+    
     # Run as real user if possible to avoid root issues with homebrew
     local run_cmd="$speedtest_cmd"
     if [[ -n "$SUDO_USER" ]]; then
@@ -180,11 +247,16 @@ function measure_bandwidth_speedtest() {
     fi
     
     local json_output
-    # Use --no-upload to save time, we mainly care about download for bufferbloat (CAKE handles upload separately usually, but here we set one bandwidth)
-    # Wait, CAKE bandwidth parameter is for the bottleneck. Usually download.
-    # We should probably measure both but download is the main one users notice.
-    # The user complained about download speed.
+    # Use --no-upload to save time, we mainly care about download for bufferbloat
     json_output=$($run_cmd --no-upload --timeout 60 --json 2>/dev/null)
+    
+    # Stop latency monitor
+    stop_ping_monitor
+    
+    # Calculate bufferbloat stats
+    calc_stats "download"
+    local loaded_latency="$FINAL_AVG"
+    local loaded_jitter="$FINAL_JITTER"
     
     if [[ -z "$json_output" ]]; then
         log_warning "Speedtest failed (no output)."
@@ -198,6 +270,12 @@ function measure_bandwidth_speedtest() {
         # Convert bits/sec to Mbit/s (integer)
         local dl_mbits
         dl_mbits=$(awk "BEGIN {printf \"%.0f\", $dl_bits / 1000000}")
+        
+        # Report bufferbloat stats if valid
+        if [[ "$loaded_latency" != "0" ]]; then
+             log_info "Detected Loaded Latency: ${loaded_latency}ms (Jitter: ${loaded_jitter}ms)"
+        fi
+        
         echo "$dl_mbits"
         return 0
     else
