@@ -237,9 +237,6 @@ function measure_bandwidth_speedtest() {
     
     log_info "Running speedtest (this may take 30-60 seconds)..."
     
-    # Start latency monitor to measure bufferbloat during download
-    start_ping_monitor "download"
-    
     # Run as real user if possible to avoid root issues with homebrew
     local run_cmd="$speedtest_cmd"
     if [[ -n "$SUDO_USER" ]]; then
@@ -250,14 +247,6 @@ function measure_bandwidth_speedtest() {
     # Use --no-upload to save time, we mainly care about download for bufferbloat
     json_output=$($run_cmd --no-upload --timeout 60 --json 2>/dev/null)
     
-    # Stop latency monitor
-    stop_ping_monitor
-    
-    # Calculate bufferbloat stats
-    calc_stats "download"
-    local loaded_latency="$FINAL_AVG"
-    local loaded_jitter="$FINAL_JITTER"
-    
     if [[ -z "$json_output" ]]; then
         log_warning "Speedtest failed (no output)."
         return 1
@@ -266,15 +255,13 @@ function measure_bandwidth_speedtest() {
     local dl_bits
     dl_bits=$(echo "$json_output" | grep -o '"download": [0-9.]*' | awk '{print $2}')
     
+    # Log raw result for debugging
+    log_info "Raw speedtest result: $dl_bits bits/sec"
+    
     if [[ -n "$dl_bits" && "$dl_bits" != "0" ]]; then
         # Convert bits/sec to Mbit/s (integer)
         local dl_mbits
         dl_mbits=$(awk "BEGIN {printf \"%.0f\", $dl_bits / 1000000}")
-        
-        # Report bufferbloat stats if valid
-        if [[ "$loaded_latency" != "0" ]]; then
-             log_info "Detected Loaded Latency: ${loaded_latency}ms (Jitter: ${loaded_jitter}ms)"
-        fi
         
         echo "$dl_mbits"
         return 0
