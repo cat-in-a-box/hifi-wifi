@@ -1,7 +1,7 @@
 #!/bin/bash
 # Common functions and variables for hifi-wifi
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 # Configuration constants
 STATE_DIR="/var/lib/wifi_patch"
@@ -548,7 +548,16 @@ EOF
 }
 
 function enable_iwd() {
-    log_info "Checking for iwd..."
+    log_info "Switching to iwd backend (--use-iwd was specified)..."
+    
+    # Warn SteamOS users about potential Developer Options conflict
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        if [[ "$ID" == "steamos" ]] || [[ "${ID_LIKE:-}" =~ "steamos" ]]; then
+            log_warning "SteamOS detected! iwd may conflict with Developer Options."
+            log_warning "If WiFi breaks, disable 'Force WPA Supplicant' in Developer Options."
+        fi
+    fi
     
     # Check for iwd presence
     local iwd_installed=false

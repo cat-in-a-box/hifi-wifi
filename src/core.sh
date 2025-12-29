@@ -65,11 +65,14 @@ cleanup_on_abort() {
           log_info "Removed service: $data"
           ;;
         BACKEND_CHANGE)
-          if [[ -f /etc/NetworkManager/conf.d/wifi_backend.conf ]]; then
-            rm -f /etc/NetworkManager/conf.d/wifi_backend.conf
-            systemctl restart NetworkManager 2>/dev/null || true
-            log_info "Reverted backend change"
-          fi
+          # AGGRESSIVE cleanup: Remove ALL possible backend config files (fixes GitHub issue #5)
+          rm -f /etc/NetworkManager/conf.d/wifi_backend.conf 2>/dev/null || true
+          rm -f /etc/NetworkManager/conf.d/iwd.conf 2>/dev/null || true
+          rm -f /etc/NetworkManager/conf.d/*hifi*.conf 2>/dev/null || true
+          # Unmask wpa_supplicant in case it was masked
+          systemctl unmask wpa_supplicant.service 2>/dev/null || true
+          systemctl restart NetworkManager 2>/dev/null || true
+          log_info "Reverted backend change (cleaned all configs)"
           ;;
       esac
     done
@@ -500,62 +503,10 @@ EOF
 
   ethtool -K "$ifc" tso off gso off gro on 2>/dev/null || true
 
-  if [[ "${NO_IWD:-0}" -eq 0 ]]; then
-      if enable_iwd; then
-          # Restart NetworkManager to apply the backend change immediately
-          log_info "Restarting NetworkManager to apply iwd backend..."
-          systemctl restart NetworkManager
-          
-          # Wait for NetworkManager to come back up and network to reconnect
-          log_info "Waiting for network to reconnect..."
-          local reconnect_timeout=30
-          local elapsed=0
-          local connected=false
-          
-          while [[ $elapsed -lt $reconnect_timeout ]]; do
-              sleep 2
-              elapsed=$((elapsed + 2))
-              
-              # Check if NetworkManager is running and if we have any active connection
-              if systemctl is-active --quiet NetworkManager; then
-                  if nmcli -t -f DEVICE,STATE device status 2>/dev/null | grep -q ":connected"; then
-                      connected=true
-                      log_success "Network reconnected successfully"
-                      
-                      # Verify actual connectivity to ensure network is fully operational
-                      log_info "Verifying internet connectivity..."
-                      local ping_success=false
-                      local ping_wait=0
-                      while [[ $ping_wait -lt 15 ]]; do
-                          if ping -c 1 -W 1 8.8.8.8 &>/dev/null; then
-                              ping_success=true
-                              log_success "Internet connectivity verified"
-                              break
-                          fi
-                          sleep 1
-                          ping_wait=$((ping_wait + 1))
-                      done
-                      
-                      if [[ "$ping_success" = false ]]; then
-                          log_warning "Internet check timed out, but network is connected. Proceeding..."
-                      fi
-                      break
-                  fi
-              fi
-              
-              if [[ $((elapsed % 10)) -eq 0 ]]; then
-                  log_info "Still waiting for network connection... (${elapsed}s elapsed)"
-              fi
-          done
-          
-          if [[ "$connected" = false ]]; then
-              log_warning "Network did not reconnect within ${reconnect_timeout}s. Continuing anyway..."
-              log_warning "You may need to manually reconnect to your network."
-          fi
-      fi
-  else
-      log_info "Skipping iwd enablement (--no-iwd flag used)"
-  fi
+  # NOTE: hifi-wifi no longer switches WiFi backends (removed in v1.2.1)
+  # - SteamOS: Use Developer Options → "Force WPA Supplicant" (iwd is default)
+  # - Bazzite: Use `ujust toggle-iwd` to switch backends
+  # We only optimize iwd settings if it's ALREADY the active backend
 
   if pidof iwd &>/dev/null || grep -q "wifi.backend=iwd" /etc/NetworkManager/conf.d/*.conf 2>/dev/null; then
     echo "[INFO] iNet Wireless Daemon (iwd) detected. Applying specific optimizations..."
@@ -638,8 +589,16 @@ function revert_patches() {
       is_wifi=false
   fi
   
-  # Revert backend to default (wpa_supplicant) ONLY if we created the override config
-  if [[ -f /etc/NetworkManager/conf.d/wifi_backend.conf ]] || [[ -f /etc/NetworkManager/conf.d/iwd.conf ]]; then
+  # Revert backend to default (wpa_supplicant) - be aggressive about cleanup
+  # Check for ANY hifi-wifi related backend configs (including legacy file names)
+  local backend_cleanup_needed=false
+  if [[ -f /etc/NetworkManager/conf.d/wifi_backend.conf ]] || \
+     [[ -f /etc/NetworkManager/conf.d/iwd.conf ]] || \
+     ls /etc/NetworkManager/conf.d/*hifi*.conf &>/dev/null 2>&1; then
+      backend_cleanup_needed=true
+  fi
+  
+  if [[ "$backend_cleanup_needed" == "true" ]]; then
       log_info "Reverting Wi-Fi backend to default (wpa_supplicant)..."
       
       # Backup network connection profiles before deletion
@@ -647,9 +606,11 @@ function revert_patches() {
       backup_dir=$(mktemp -d)
       cp -r /etc/NetworkManager/system-connections/. "$backup_dir/" 2>/dev/null || true
       
-      # Manual revert to avoid TUI and ensure consistency
+      # AGGRESSIVE cleanup: Remove ALL hifi-wifi related backend configs
+      # This ensures we don't leave any "poisoned" configs behind (fixes GitHub issue #5)
       rm -f /etc/NetworkManager/conf.d/iwd.conf
       rm -f /etc/NetworkManager/conf.d/wifi_backend.conf
+      rm -f /etc/NetworkManager/conf.d/*hifi*.conf 2>/dev/null || true
       
       # Unmask wpa_supplicant
       systemctl unmask wpa_supplicant.service 2>/dev/null || true
