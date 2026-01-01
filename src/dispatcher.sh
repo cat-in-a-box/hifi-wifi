@@ -226,6 +226,7 @@ if true; then  # New profile creation block
     
     if [[ -n "$LINK_SPEED" && $LINK_SPEED -gt 0 ]]; then
         CAKE_LIMIT=$((LINK_SPEED * OVERHEAD_PERCENT / 100))
+        [[ $CAKE_LIMIT -lt 1 ]] && CAKE_LIMIT=1
         BANDWIDTH="${CAKE_LIMIT}mbit"
         log "Detected link speed: ${LINK_SPEED}Mbit/s, setting CAKE to ${CAKE_LIMIT}Mbit/s (${OVERHEAD_PERCENT}%)"
     else

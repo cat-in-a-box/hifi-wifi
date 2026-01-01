@@ -207,68 +207,122 @@ function calc_stats() {
 }
 # -----------------------------------------------------------------
 
-function measure_bandwidth_speedtest() {
-    local speedtest_cmd=""
+function measure_bandwidth_active() {
+    echo "[INFO] Measuring download bandwidth using speedtest-cli..." >&2
     
-    # Check for speedtest-cli
+    # Use speedtest-cli with --simple for parseable output
+    # Falls back to curl if speedtest-cli unavailable
     if command -v speedtest-cli &>/dev/null; then
-        speedtest_cmd="speedtest-cli"
-    else
-        # Try to install it
-        log_info "speedtest-cli not found. Installing for accurate bandwidth detection..."
-        if install_dependencies "speedtest-cli"; then
-             if command -v speedtest-cli &>/dev/null; then
-                 speedtest_cmd="speedtest-cli"
-             fi
-        fi
-    fi
-    
-    if [[ -z "$speedtest_cmd" ]]; then
-        # Try homebrew path explicitly if not in PATH
-        if [[ -f "/home/linuxbrew/.linuxbrew/bin/speedtest-cli" ]]; then
-             speedtest_cmd="/home/linuxbrew/.linuxbrew/bin/speedtest-cli"
-        fi
-    fi
-
-    if [[ -z "$speedtest_cmd" ]]; then
-        log_warning "Could not install speedtest-cli. Falling back to link speed detection."
-        return 1
-    fi
-    
-    log_info "Running speedtest (this may take 30-60 seconds)..."
-    
-    # Run as real user if possible to avoid root issues with homebrew
-    local run_cmd="$speedtest_cmd"
-    if [[ -n "$SUDO_USER" ]]; then
-        run_cmd="sudo -u $SUDO_USER $speedtest_cmd"
-    fi
-    
-    local json_output
-    # Use --no-upload to save time, we mainly care about download for bufferbloat
-    json_output=$($run_cmd --no-upload --timeout 60 --json 2>/dev/null)
-    
-    if [[ -z "$json_output" ]]; then
-        log_warning "Speedtest failed (no output)."
-        return 1
-    fi
-    
-    local dl_bits
-    dl_bits=$(echo "$json_output" | grep -o '"download": [0-9.]*' | awk '{print $2}')
-    
-    # Log raw result for debugging
-    log_info "Raw speedtest result: $dl_bits bits/sec"
-    
-    if [[ -n "$dl_bits" && "$dl_bits" != "0" ]]; then
-        # Convert bits/sec to Mbit/s (integer)
-        local dl_mbits
-        dl_mbits=$(awk "BEGIN {printf \"%.0f\", $dl_bits / 1000000}")
+        local result
+        result=$(timeout 60 speedtest-cli --simple 2>&1 || true)
         
-        echo "$dl_mbits"
-        return 0
-    else
-        log_warning "Could not parse speedtest output."
+        # Parse download speed from "Download: XXX.XX Mbit/s"
+        local download_mbps
+        download_mbps=$(echo "$result" | grep "Download:" | awk '{print $2}' | awk '{printf "%.0f", $1}')
+        
+        if [[ -n "$download_mbps" && "$download_mbps" -gt 0 ]]; then
+            echo "[INFO] speedtest-cli download result: ${download_mbps} Mbit/s" >&2
+            echo "$download_mbps"
+            return 0
+        else
+            echo "[WARNING] speedtest-cli failed, falling back to curl test" >&2
+        fi
+    fi
+    
+    # Fallback: Use curl + Tele2 Speedtest
+    echo "[INFO] Measuring bandwidth using Tele2 fallback test..." >&2
+    local url="http://speedtest.tele2.net/1GB.zip"
+    local speed_bps
+    
+    speed_bps=$(curl -s -o /dev/null -w "%{speed_download}" --max-time 120 "$url" || true)
+    
+    # Check if we got a number
+    if [[ ! "$speed_bps" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "[WARNING] Speed test failed (invalid output: $speed_bps)" >&2
         return 1
     fi
+    
+    # Convert bytes/sec to bits/sec
+    local speed_bits
+    speed_bits=$(echo "$speed_bps * 8" | bc 2>/dev/null | awk '{printf "%.0f", $1}')
+    
+    if [[ -z "$speed_bits" || "$speed_bits" == "0" ]]; then
+         echo "[WARNING] Speed test returned 0." >&2
+         return 1
+    fi
+    
+    echo "[INFO] Raw download speedtest result: $speed_bits bits/sec" >&2
+    
+    # Convert to Mbit/s for return
+    local speed_mbit
+    speed_mbit=$(echo "scale=0; $speed_bits / 1000000" | bc)
+    
+    echo "$speed_mbit"
+    return 0
+}
+
+function measure_upload_bandwidth() {
+    echo "[INFO] Measuring upload bandwidth using speedtest-cli..." >&2
+    
+    # Use speedtest-cli with --simple for parseable output
+    # Falls back to curl if speedtest-cli unavailable
+    if command -v speedtest-cli &>/dev/null; then
+        local result
+        result=$(timeout 60 speedtest-cli --simple 2>&1 || true)
+        
+        # Parse upload speed from "Upload: XXX.XX Mbit/s"
+        local upload_mbps
+        upload_mbps=$(echo "$result" | grep "Upload:" | awk '{print $2}' | awk '{printf "%.0f", $1}')
+        
+        if [[ -n "$upload_mbps" && "$upload_mbps" -gt 0 ]]; then
+            echo "[INFO] speedtest-cli upload result: ${upload_mbps} Mbit/s" >&2
+            echo "$upload_mbps"
+            return 0
+        else
+            echo "[WARNING] speedtest-cli failed, falling back to curl test" >&2
+        fi
+    fi
+    
+    # Fallback: Use curl + Tele2
+    echo "[INFO] Measuring upload bandwidth (200MB test to Tele2)..." >&2
+    
+    # Create 200MB of zero data for upload test
+    # At 50Mbps (6.25MB/s), 200MB takes ~32 seconds
+    local upload_file="/tmp/hifi-upload-test.bin"
+    dd if=/dev/zero of="$upload_file" bs=1M count=200 2>/dev/null
+    
+    # Upload to Tele2 speed test endpoint
+    local url="http://speedtest.tele2.net/upload.php"
+    local speed_bps
+    
+    # -w "%{speed_upload}" gives bytes/sec for upload
+    speed_bps=$(curl -s -o /dev/null -w "%{speed_upload}" --max-time 120 -F "file=@${upload_file}" "$url" || true)
+    
+    rm -f "$upload_file"
+    
+    # Check if we got a number
+    if [[ ! "$speed_bps" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "[WARNING] Upload speed test failed (invalid output: $speed_bps)" >&2
+        return 1
+    fi
+    
+    # Convert bytes/sec to bits/sec
+    local speed_bits
+    speed_bits=$(echo "$speed_bps * 8" | bc 2>/dev/null | awk '{printf "%.0f", $1}')
+    
+    if [[ -z "$speed_bits" || "$speed_bits" == "0" ]]; then
+         echo "[WARNING] Upload speed test returned 0." >&2
+         return 1
+    fi
+    
+    echo "[INFO] Raw upload speedtest result: $speed_bits bits/sec" >&2
+    
+    # Convert to Mbit/s for return
+    local speed_mbit
+    speed_mbit=$(echo "scale=0; $speed_bits / 1000000" | bc)
+    
+    echo "$speed_mbit"
+    return 0
 }
 
 function apply_patches() {
@@ -282,22 +336,24 @@ function apply_patches() {
   # Ensure state directories exist (fixes #4: missing directory error)
   mkdir -p "$STATE_DIR" "$NETWORK_PROFILES_DIR" 2>/dev/null || true
   
-  local ifc
-  if ! ifc=$(detect_interface); then
-    log_error "Could not auto-detect Wi-Fi interface"
+  local interfaces
+  mapfile -t interfaces < <(detect_all_interfaces)
+  
+  if [[ ${#interfaces[@]} -eq 0 ]]; then
+    log_error "Could not auto-detect any active network interface"
     return 1
   fi
   
-  log_info "Using interface: $ifc"
+  log_info "Detected interfaces: ${interfaces[*]}"
   
   # Abort early if network is busy - accurate bandwidth detection requires idle network
-  if ! check_network_idle_or_abort "$ifc"; then
+  if ! check_network_idle_or_abort "${interfaces[0]}"; then
     return 1
   fi
 
   if [[ ${DRY_RUN:-0} -eq 1 ]]; then
     log_info "[DRY-RUN] Would apply the following changes:"
-    log_info "  - Disable power saving on $ifc"
+    log_info "  - Disable power saving on detected interfaces"
     log_info "  - Create /etc/modprobe.d/rtw89.conf"
     log_info "  - Create /etc/modprobe.d/rtw89_advanced.conf"
     log_info "  - Create /etc/udev/rules.d/70-wifi-powersave.rules"
@@ -372,16 +428,6 @@ EOF
   else
     log_info "Applying maximum performance settings for desktop..."
     
-    if iw dev "$ifc" set power_save off 2>/dev/null; then
-      track_change "POWER_SAVE" "$ifc"
-      log_success "Power saving DISABLED on $ifc (desktop performance mode)"
-    else
-      log_warning "Could not disable power saving (may not be supported by driver)"
-    fi
-    
-    ethtool -s "$ifc" speed 1000 duplex full 2>/dev/null && \
-      log_success "Set link speed to maximum" || true
-    
     cp "$PROJECT_ROOT/src/desktop-performance.sh" /usr/local/bin/wifi-desktop-performance.sh
     chmod +x /usr/local/bin/wifi-desktop-performance.sh
     
@@ -390,8 +436,7 @@ EOF
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="wl*", RUN+="/usr/local/bin/wifi-desktop-performance.sh %k"
 EOF
     
-    /usr/local/bin/wifi-desktop-performance.sh "$ifc"
-    log_success "Desktop performance mode configured and active"
+    log_success "Desktop performance mode configured"
   fi
   
   # Apply driver-specific module parameters
@@ -400,8 +445,11 @@ EOF
       log_info "Applying Realtek RTW89 driver optimizations..."
       create_tracked_file /etc/modprobe.d/rtw89.conf << 'EOF'
 # Realtek RTW89 optimizations (RTL8852/RTL8852BE/etc)
+# Disable power management for consistent latency
 options rtw89_pci disable_aspm=1 disable_clkreq=1
 options rtw89_core tx_ampdu_subframes=32
+# Disable low power states that cause latency spikes
+options rtw89_8852be disable_ps_mode=1
 EOF
       ;;
     rtw88)
@@ -483,23 +531,30 @@ EOF
     log_success "Created driver-specific configuration"
   fi
 
-  local UDEV_FILE="/etc/udev/rules.d/70-wifi-powersave.rules"
-  echo 'ACTION=="add", SUBSYSTEM=="net", KERNEL=="wl*", RUN+="/usr/sbin/iw dev %k set power_save off"' | create_tracked_file "$UDEV_FILE"
-
-  local UUID=$(current_ssid_uuid)
-  if [[ -n "$UUID" ]]; then
-    backup_connection "$UUID"
-    echo "[PATCH] Adjusting NetworkManager connection UUID=$UUID"
-    nmcli connection modify "$UUID" ipv6.method ignore || true
-    nmcli connection modify "$UUID" ipv4.method auto || true
-    nmcli connection modify "$UUID" wifi.cloned-mac-address permanent || true
+  # --- Global Setup ---
+  
+  # Measure Internet Bandwidth ONCE for all interfaces
+  log_info "Measuring internet connection speed (for bufferbloat protection)..."
+  local global_download_speed=0
+  local global_upload_speed=0
+  
+  if global_download_speed=$(measure_bandwidth_active); then
+      log_success "Internet Download Speed: ${global_download_speed}Mbit/s"
   else
-    echo "[PATCH] No active Wi-Fi connection to tune"
+      log_warning "Internet speed test failed, will rely on link speed"
+      global_download_speed=0
+  fi
+  
+  if global_upload_speed=$(measure_upload_bandwidth); then
+      log_success "Internet Upload Speed: ${global_upload_speed}Mbit/s"
+  else
+      log_warning "Internet upload test failed, will rely on defaults"
+      global_upload_speed=0
   fi
 
-  echo "[PATCH] Applying upload speed optimizations..."
-  
-  create_tracked_file /etc/modprobe.d/rtw89_advanced.conf << 'EOF'
+  # Only create rtw89 config if that driver is actually in use
+  if [[ "$DRIVER_CATEGORY" == "rtw89" ]]; then
+    create_tracked_file /etc/modprobe.d/rtw89_advanced.conf << 'EOF'
 # RTL8852BE upload speed optimizations and bufferbloat mitigation
 options rtw89_8852be disable_clkreq=1
 options rtw89_pci disable_aspm=1 disable_clkreq=1
@@ -509,84 +564,14 @@ options rtw89_8852be thermal_th=85
 options rtw89_pci tx_queue_len=1000
 options rtw89_8852be tx_power_reduction=2
 EOF
+  fi
 
-  log_info "Configuring network queue discipline for bufferbloat control..."
-  tc qdisc del dev "$ifc" root 2>/dev/null || true
-  
-  local current_ssid
-  current_ssid=$(get_current_ssid)
-  local bandwidth="200mbit"
-  
-  if [[ -n "$current_ssid" ]]; then
-    log_info "Current network: $current_ssid"
-    
-    if load_network_profile "$current_ssid"; then
-      log_info "Loaded saved profile for $current_ssid: $BANDWIDTH"
-      bandwidth="$BANDWIDTH"
-    else
-      log_info "No profile found for $current_ssid, creating new profile..."
-      
-      log_info "Detecting optimal bandwidth settings..."
-      local measured_speed
-      local overhead_percent=85
-      
-      # Try actual speedtest first (more accurate)
-      if measured_speed=$(measure_bandwidth_speedtest); then
-          # Use 95% of ACTUAL measured speed (since it's real throughput, not link speed)
-          overhead_percent=95
-          local cake_limit=$((measured_speed * overhead_percent / 100))
-          bandwidth="${cake_limit}mbit"
-          log_success "Measured download speed: ${measured_speed}Mbit/s. Setting CAKE to ${cake_limit}Mbit/s (${overhead_percent}%)"
-      else
-          # Fallback to link speed
-          log_info "Falling back to link speed detection..."
-          local link_speed
-          link_speed=$(iw dev "$ifc" link 2>/dev/null | grep -oP 'tx bitrate: \K[0-9]+' | head -1 || true)
-          
-          if [[ -z "$link_speed" ]]; then
-              link_speed=$(ethtool "$ifc" 2>/dev/null | grep -oP 'Speed: \K[0-9]+' | head -1 || true)
-              if [[ -n "$link_speed" ]]; then
-                  overhead_percent=95
-                  log_info "Ethernet detected, using aggressive ${overhead_percent}% limit"
-              fi
-          fi
-          
-          if [[ -n "$link_speed" && $link_speed -gt 0 ]]; then
-            local cake_limit=$((link_speed * overhead_percent / 100))
-            bandwidth="${cake_limit}mbit"
-            log_info "Detected link speed: ${link_speed}Mbit/s, setting CAKE to ${cake_limit}Mbit/s (${overhead_percent}%)"
-          else
-            log_warning "Could not detect link speed, using default ${bandwidth}"
-          fi
-      fi
-      
-      save_network_profile "$current_ssid" "$bandwidth" "auto"
-    fi
-  else
-    log_warning "No active network detected, using default bandwidth"
+  # Load IFB module for download shaping (support up to 4 interfaces)
+  if ! lsmod | grep -q ifb; then
+      modprobe ifb numifbs=4 2>/dev/null || log_warning "Could not load IFB module"
   fi
-  
-  if tc qdisc add dev "$ifc" root cake bandwidth "$bandwidth" diffserv4 dual-dsthost nat wash ack-filter 2>/dev/null; then
-    track_change "TC_QDISC" "$ifc"
-    log_success "Applied CAKE qdisc with bandwidth ${bandwidth}"
-    if tc qdisc show dev "$ifc" | grep -q "cake"; then
-      log_info "CAKE qdisc verified active on $ifc"
-    fi
-  else
-    log_warning "CAKE unavailable, falling back to fq_codel"
-    if tc qdisc add dev "$ifc" root handle 1: fq_codel limit 300 target 2ms interval 50ms quantum 300 ecn 2>/dev/null; then
-      track_change "TC_QDISC" "$ifc"
-      log_info "Applied aggressive fq_codel for bufferbloat control"
-    else
-      log_warning "Could not apply any queue discipline"
-    fi
-  fi
-  
-  echo "$bandwidth" > "$STATE_DIR/cake_bandwidth.txt"
-  
-  local saved_bandwidth
-  saved_bandwidth=$(cat "$STATE_DIR/cake_bandwidth.txt" 2>/dev/null || echo "200mbit")
-  
+
+  # Create dynamic systemd service for CAKE
   create_tracked_file /etc/systemd/system/wifi-cake-qdisc@.service <<EOF
 [Unit]
 Description=Apply CAKE qdisc to %I for bufferbloat control
@@ -596,17 +581,131 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'tc qdisc del dev %I root 2>/dev/null || true; tc qdisc add dev %I root cake bandwidth ${saved_bandwidth} diffserv4 dual-dsthost nat wash ack-filter'
+ExecStart=/bin/sh -c 'bw=\$(cat /var/lib/wifi_patch/bandwidth_%I.txt 2>/dev/null || echo 200mbit); up_bw=\$(cat /var/lib/wifi_patch/upload_bandwidth_%I.txt 2>/dev/null || echo 50mbit); tc qdisc replace dev %I root cake bandwidth \${up_bw} diffserv4 dual-dsthost nat wash ack-filter 2>/dev/null || tc qdisc replace dev %I root fq_codel'
 ExecStop=/bin/sh -c 'test -d /sys/class/net/%I && tc qdisc del dev %I root 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
 EOF
+  track_change "SYSTEMD_SERVICE" "wifi-cake-qdisc@.service"
 
-  systemctl enable "wifi-cake-qdisc@${ifc}.service" 2>/dev/null || log_warning "Could not enable CAKE systemd service"
-  track_change "SYSTEMD_SERVICE" "wifi-cake-qdisc@${ifc}.service"
-  systemctl daemon-reload 2>/dev/null || true
-  log_success "CAKE qdisc will persist across reboots"
+  # --- Per-Interface Loop ---
+  local ifb_index=0
+  for ifc in "${interfaces[@]}"; do
+      log_info "--- Configuring interface: $ifc ---"
+      
+      # 1. Power Save (Desktop)
+      if [[ $is_battery_device -eq 0 ]]; then
+          if iw dev "$ifc" set power_save off 2>/dev/null; then
+              track_change "POWER_SAVE" "$ifc"
+              log_success "Power saving DISABLED on $ifc"
+          fi
+          ethtool -s "$ifc" speed 1000 duplex full 2>/dev/null || true
+          /usr/local/bin/wifi-desktop-performance.sh "$ifc" 2>/dev/null || true
+      fi
+      
+      # 2. UDEV Rules (Power Save)
+      local UDEV_FILE="/etc/udev/rules.d/70-wifi-powersave-${ifc}.rules"
+      echo "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"$ifc\", RUN+=\"/usr/sbin/iw dev %k set power_save off\"" | create_tracked_file "$UDEV_FILE"
+      
+      # 3. NM Connection UUID
+      local UUID
+      UUID=$(nmcli -t -f UUID,DEVICE connection show --active | grep ":$ifc" | cut -d: -f1 | head -1)
+      
+      if [[ -n "$UUID" ]]; then
+          backup_connection "$UUID"
+          echo "[PATCH] Adjusting NetworkManager connection UUID=$UUID ($ifc)"
+          nmcli connection modify "$UUID" ipv6.method ignore || true
+          nmcli connection modify "$UUID" ipv4.method auto || true
+          
+          local ifc_type=$(get_interface_type "$ifc")
+          if [[ "$ifc_type" == "wifi" ]]; then
+              nmcli connection modify "$UUID" wifi.cloned-mac-address permanent || true
+          fi
+      fi
+      
+      # 4. Bandwidth & CAKE
+      local ifc_type=$(get_interface_type "$ifc")
+      local link_speed=0
+      local overhead_percent=85
+      
+      if [[ "$ifc_type" == "ethernet" ]]; then
+          link_speed=$(ethtool "$ifc" 2>/dev/null | grep -oP 'Speed: \K[0-9]+' | head -1 || true)
+          overhead_percent=95
+      else
+          # Wi-Fi
+          link_speed=$(iw dev "$ifc" link 2>/dev/null | grep -oP 'tx bitrate: \K[0-9]+' | head -1 || true)
+          overhead_percent=85
+      fi
+      
+      # Calculate Download Limit
+      local bandwidth_limit
+      if [[ -n "$link_speed" && "$link_speed" -gt 0 ]]; then
+          local link_limit=$((link_speed * overhead_percent / 100))
+          
+          if [[ "$global_download_speed" -gt 0 ]]; then
+              # Use min(Link, Internet)
+              if [[ "$link_limit" -lt "$global_download_speed" ]]; then
+                  bandwidth_limit="$link_limit"
+                  log_info "Using Link Speed limit: ${bandwidth_limit}Mbit/s (Link: ${link_speed}Mbit/s)"
+              else
+                  bandwidth_limit="$global_download_speed"
+                  log_info "Using Internet Speed limit: ${bandwidth_limit}Mbit/s (Internet: ${global_download_speed}Mbit/s)"
+              fi
+          else
+              bandwidth_limit="$link_limit"
+              log_info "Using Link Speed limit: ${bandwidth_limit}Mbit/s (No internet test)"
+          fi
+      else
+          bandwidth_limit="200" # Default
+          log_warning "Could not detect link speed, using default ${bandwidth_limit}Mbit/s"
+      fi
+      
+      [[ $bandwidth_limit -lt 1 ]] && bandwidth_limit=1
+      local bandwidth="${bandwidth_limit}mbit"
+      
+      # Calculate Upload Limit
+      local upload_limit
+      if [[ "$global_upload_speed" -gt 0 ]]; then
+          upload_limit=$((global_upload_speed * 95 / 100))
+      else
+          upload_limit=50 # Default
+      fi
+      [[ $upload_limit -lt 1 ]] && upload_limit=1
+      local upload_bandwidth="${upload_limit}mbit"
+      
+      # Save for Systemd Service
+      echo "$bandwidth" > "$STATE_DIR/bandwidth_${ifc}.txt"
+      echo "$upload_bandwidth" > "$STATE_DIR/upload_bandwidth_${ifc}.txt"
+      
+      # Apply CAKE (Upload)
+      if tc qdisc replace dev "$ifc" root cake bandwidth "$upload_bandwidth" diffserv4 dual-dsthost nat wash ack-filter 2>/dev/null; then
+          track_change "TC_QDISC" "$ifc"
+          log_success "Applied CAKE on $ifc (Up: $upload_bandwidth)"
+      fi
+      
+      # Apply CAKE (Download via IFB)
+      local ifb_dev="ifb$ifb_index"
+      if ip link show "$ifb_dev" &>/dev/null; then
+          ip link set dev "$ifb_dev" up 2>/dev/null
+          tc qdisc del dev "$ifc" ingress 2>/dev/null || true
+          if tc qdisc add dev "$ifc" handle ffff: ingress 2>/dev/null && \
+             tc filter add dev "$ifc" parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev "$ifb_dev" 2>/dev/null; then
+              if tc qdisc replace dev "$ifb_dev" root cake bandwidth "$bandwidth" diffserv4 dual-srchost nat nowash ingress 2>/dev/null; then
+                  track_change "TC_QDISC_IFB" "$ifb_dev"
+                  log_success "Applied download CAKE on $ifc via $ifb_dev (Down: $bandwidth)"
+              fi
+          fi
+      fi
+      ((ifb_index++))
+      
+      # Enable Service
+      systemctl enable "wifi-cake-qdisc@${ifc}.service" 2>/dev/null || true
+      track_change "SYSTEMD_SERVICE" "wifi-cake-qdisc@${ifc}.service"
+      
+      ethtool -K "$ifc" tso off gso off gro on 2>/dev/null || true
+      
+  done
   
   cat > /etc/systemd/system/wifi-optimizations-verify.service << 'EOF'
 [Unit]
@@ -677,6 +776,13 @@ EOF
       echo "[INFO] Existing /etc/iwd/main.conf found. Skipping overwrite to preserve user settings."
     fi
   fi
+
+  # Force NetworkManager to disable power saving
+  log_info "Configuring NetworkManager to disable Wi-Fi power saving..."
+  create_tracked_file /etc/NetworkManager/conf.d/99-hifi-wifi-powersave.conf << 'EOF'
+[connection]
+wifi.powersave=2
+EOF
 
   rfkill unblock wifi || true
 

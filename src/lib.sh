@@ -1,7 +1,12 @@
 #!/bin/bash
 # Common functions and variables for hifi-wifi
 
-VERSION="1.2.2"
+VERSION="1.3.0"
+
+# Ensure homebrew binaries are in PATH (needed when running with sudo)
+if [[ -d "/home/linuxbrew/.linuxbrew/bin" ]] && [[ ":$PATH:" != *":/home/linuxbrew/.linuxbrew/bin:"* ]]; then
+    export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+fi
 
 # Configuration constants
 STATE_DIR="/var/lib/wifi_patch"
@@ -158,8 +163,8 @@ function install_dependencies() {
         ["ethtool"]="ethtool"
         ["sysctl"]="procps-ng"
         ["iwd"]="iwd"
-        ["speedtest-cli"]="speedtest-cli"
         ["bc"]="bc"
+        ["curl"]="curl"
     )
     
     local packages=()
@@ -269,6 +274,41 @@ function check_dependencies() {
     return 0
 }
 
+# Detect the interface that is actually carrying traffic (default route)
+function detect_default_interface() {
+    # Get the interface used for the default route (this is where traffic actually flows)
+    local default_ifc
+    default_ifc=$(ip route show default 2>/dev/null | head -1 | awk '{print $5}')
+    
+    if [[ -n "$default_ifc" ]] && ip link show "$default_ifc" &>/dev/null; then
+        echo "$default_ifc"
+        return 0
+    fi
+    
+    # Fallback: try IPv6 default route
+    default_ifc=$(ip -6 route show default 2>/dev/null | head -1 | awk '{print $5}')
+    if [[ -n "$default_ifc" ]] && ip link show "$default_ifc" &>/dev/null; then
+        echo "$default_ifc"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Detect interface type (wifi, ethernet, etc)
+function get_interface_type() {
+    local ifc="$1"
+    if [[ "$ifc" =~ ^wl ]]; then
+        echo "wifi"
+    elif [[ "$ifc" =~ ^(en|eth) ]]; then
+        echo "ethernet"
+    elif [[ "$ifc" =~ ^(tailscale|tun|tap) ]]; then
+        echo "vpn"
+    else
+        echo "unknown"
+    fi
+}
+
 function detect_interface() {
     if [[ -n "$INTERFACE" ]]; then
         if ip link show "$INTERFACE" &>/dev/null; then
@@ -279,11 +319,25 @@ function detect_interface() {
             return 1
         fi
     fi
-    # pick first wireless interface in state UP or DOWN
+    
+    # PRIORITY 1: Use the interface that's actually carrying traffic (default route)
+    local default_ifc
+    if default_ifc=$(detect_default_interface); then
+        local ifc_type=$(get_interface_type "$default_ifc")
+        # Skip VPN interfaces, we want the underlying connection
+        if [[ "$ifc_type" != "vpn" ]]; then
+            # Send log to stderr so it doesn't pollute the return value
+            echo "[INFO] Detected active interface: $default_ifc ($ifc_type)" >&2
+            echo "$default_ifc"
+            return 0
+        fi
+    fi
+    
+    # PRIORITY 2: Pick first wireless interface in state UP
     local ifc
     ifc=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^wl' | head -n1)
     
-    # If no wireless, look for ethernet (en* or eth*) that is UP
+    # PRIORITY 3: If no wireless, look for ethernet (en* or eth*) that is UP
     if [[ -z "$ifc" ]]; then
         ifc=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | head -n1)
     fi
@@ -541,12 +595,41 @@ function save_network_profile() {
 # Expiry tier: New network (will adjust based on usage frequency)
 SSID="$ssid"
 BANDWIDTH="$bandwidth"
+UPLOAD_BANDWIDTH="50mbit"
 POWER_MODE="$power_mode"
 CREATED_DATE=$now_epoch
 EXPIRY_DATE=$expiry_epoch
 CONNECTION_COUNT=1
 EOF
     log_success "Saved profile for network: $ssid (expires in $expiry_days days, adjusts with usage)"
+}
+
+function save_network_profile_with_upload() {
+    local ssid="$1"
+    local bandwidth="$2"
+    local upload_bandwidth="$3"
+    local power_mode="${4:-auto}"  # auto, always-off, always-on
+    local profile
+    profile=$(get_network_profile "$ssid")
+    
+    local now_epoch=$(date +%s)
+    local expiry_days=$EXPIRY_NEW
+    local expiry_epoch=$((now_epoch + expiry_days * 86400))
+    
+    cat > "$profile" << EOF
+# Network profile for: $ssid
+# Generated: $(date)
+# Expires: $(date -d "@$expiry_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r $expiry_epoch '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "in ${expiry_days} days")
+# Expiry tier: New network (will adjust based on usage frequency)
+SSID="$ssid"
+BANDWIDTH="$bandwidth"
+UPLOAD_BANDWIDTH="$upload_bandwidth"
+POWER_MODE="$power_mode"
+CREATED_DATE=$now_epoch
+EXPIRY_DATE=$expiry_epoch
+CONNECTION_COUNT=1
+EOF
+    log_success "Saved profile for network: $ssid (Download: $bandwidth, Upload: $upload_bandwidth, expires in $expiry_days days)"
 }
 
 function enable_iwd() {
@@ -718,4 +801,11 @@ function detect_wifi_hardware() {
         log_warning "Could not auto-detect Wi-Fi driver"
         return 1
     fi
+}
+
+# Detect all active network interfaces (Ethernet and Wi-Fi)
+function detect_all_interfaces() {
+    # Find all interfaces that are UP and not loopback/vpn
+    # We look for 'state UP' in ip link output
+    ip -o link show up | awk -F': ' '{print $2}' | grep -E '^(en|eth|wl)' | sort -u
 }
