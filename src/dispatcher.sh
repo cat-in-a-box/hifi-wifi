@@ -99,6 +99,7 @@ get_link_speed() {
 get_power_mode() {
     # Check for forced performance mode
     if [[ -f "$STATE_DIR/force_performance" ]]; then
+        log "Power mode: Performance (forced)"
         echo "off"
         return
     fi
@@ -115,12 +116,14 @@ get_power_mode() {
     
     # If no system battery detected, this is a desktop - always performance
     if [[ $has_battery -eq 0 ]]; then
+        log "Power mode: Desktop detected (no system battery)"
         echo "off"
         return
     fi
     
     # Battery device - check AC status by power supply type (with timeout to prevent hangs)
     local ac_online=0
+    local ac_source=""
     
     # Check all power supplies for type="Mains" or "USB" (USB-C charging on Steam Deck/laptops)
     for psu in /sys/class/power_supply/*; do
@@ -134,6 +137,7 @@ get_power_mode() {
                 local online=$(timeout 0.5 cat "$psu/online" 2>/dev/null || echo "0")
                 if [[ "$online" == "1" ]]; then
                     ac_online=1
+                    ac_source="$(basename "$psu") (type=$psu_type)"
                     break
                 fi
             fi
@@ -148,6 +152,7 @@ get_power_mode() {
                 local status=$(timeout 0.5 cat "$bat" 2>/dev/null || echo "Unknown")
                 if [[ "$status" =~ ^(Charging|Full|Not\ charging)$ ]]; then
                     ac_online=1
+                    ac_source="battery status: $status"
                     break
                 fi
             fi
@@ -155,8 +160,10 @@ get_power_mode() {
     fi
     
     if [[ $ac_online -eq 1 ]]; then
+        log "Power mode: AC connected via $ac_source"
         echo "off"  # AC = performance
     else
+        log "Power mode: On battery (power saving)"
         echo "on"   # Battery = power save
     fi
 }
