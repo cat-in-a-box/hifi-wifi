@@ -38,10 +38,30 @@ fi
 echo ""
 echo "[1/13] Running hifi-wifi --revert (if installed)..."
 if command -v hifi-wifi &>/dev/null; then
-    hifi-wifi --revert --quiet 2>/dev/null || echo "  [WARN] Revert had issues, continuing cleanup..."
+    # On SteamOS, skip --revert since it re-enables read-only filesystem
+    # We'll do manual cleanup instead
+    if [[ "$IS_STEAMOS" != "true" ]]; then
+        hifi-wifi --revert --quiet 2>/dev/null || echo "  [WARN] Revert had issues, continuing cleanup..."
+    else
+        echo "  [SKIP] SteamOS detected - will do manual cleanup to keep filesystem writable"
+    fi
 else
     echo "  [SKIP] hifi-wifi not in PATH"
 fi
+
+# Manual revert operations (especially important on SteamOS)
+echo ""
+echo "[1b/13] Manual cleanup of network optimizations..."
+# Remove CAKE from all interfaces
+for ifc in $(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(wl|en|eth)'); do
+    tc qdisc del dev "$ifc" root 2>/dev/null || true
+    tc qdisc del dev "$ifc" ingress 2>/dev/null || true
+done
+# Clean up IFB devices (legacy)
+for ifb in ifb0 ifb1 ifb2 ifb3; do
+    tc qdisc del dev "$ifb" root 2>/dev/null || true
+done
+echo "  [OK] Network optimizations cleared"
 
 echo ""
 echo "[2/13] Stopping systemd services..."
