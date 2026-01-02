@@ -88,14 +88,15 @@ get_power_mode() {
         return
     fi
     
-    # Check for system battery
+    # Check for system battery (with timeout to prevent hangs)
     local has_battery=0
     
-    if [[ -d /sys/class/power_supply/BAT0 ]] || [[ -d /sys/class/power_supply/BAT1 ]] || \
-       [[ -d /sys/class/power_supply/battery ]]; then
+    if timeout 0.5 test -d /sys/class/power_supply/BAT0 2>/dev/null || \
+       timeout 0.5 test -d /sys/class/power_supply/BAT1 2>/dev/null || \
+       timeout 0.5 test -d /sys/class/power_supply/battery 2>/dev/null; then
         has_battery=1
     elif [[ -f /sys/class/dmi/id/chassis_type ]]; then
-        local chassis=$(cat /sys/class/dmi/id/chassis_type 2>/dev/null)
+        local chassis=$(timeout 0.5 cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo "0")
         [[ "$chassis" =~ ^(8|9|10|11|14|30|31)$ ]] && has_battery=1
     fi
     
@@ -105,20 +106,25 @@ get_power_mode() {
         return
     fi
     
-    # Battery device - check AC status
+    # Battery device - check AC status (with timeout to prevent hangs)
     local ac_online=0
     
     for ac in /sys/class/power_supply/AC*/online /sys/class/power_supply/ADP*/online; do
-        if [[ -f "$ac" ]] && [[ $(cat "$ac" 2>/dev/null) == "1" ]]; then
-            ac_online=1
-            break
+        if [[ -f "$ac" ]]; then
+            local online=$(timeout 0.5 cat "$ac" 2>/dev/null || echo "0")
+            if [[ "$online" == "1" ]]; then
+                ac_online=1
+                break
+            fi
         fi
     done
     
+    # Fallback: Check battery status (Charging/Full means AC is connected)
+    # Use timeout to prevent hangs from stuck battery indicators
     if [[ $ac_online -eq 0 ]]; then
         for bat in /sys/class/power_supply/BAT*/status /sys/class/power_supply/battery/status; do
             if [[ -f "$bat" ]]; then
-                local status=$(cat "$bat" 2>/dev/null)
+                local status=$(timeout 0.5 cat "$bat" 2>/dev/null || echo "Unknown")
                 if [[ "$status" =~ ^(Charging|Full|Not\ charging)$ ]]; then
                     ac_online=1
                     break
