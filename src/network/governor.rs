@@ -1,14 +1,15 @@
 //! The Governor - The "Brain" of hifi-wifi
 //!
 //! Per rewrite.md: Runs the async loop (Tick Rate: 2 seconds) and implements:
-//! - Breathing CAKE (Dynamic QoS with EMA)
+//! - Breathing CAKE (Dynamic QoS with asymmetric response)
 //! - CPU Governor (Smart Coalescing)
 //! - Smart Band Steering (with Hysteresis)
-//! - Game Mode Detection (PPS)
+//! - Game Mode Detection (PPS) with CAKE freezing
 
 use anyhow::Result;
 use log::{info, debug, warn};
 use std::time::{Duration, Instant};
+use std::process::Command;
 use tokio::time;
 
 use crate::config::structs::{GovernorConfig, WifiConfig};
@@ -34,11 +35,15 @@ struct InterfaceState {
     roam_candidate: Option<RoamCandidate>,
     game_mode_until: Option<Instant>,
     coalescing_enabled: bool,
-    coalescing_stable_ticks: u32,      // Hysteresis for coalescing changes
-    pending_coalescing: Option<bool>,  // Pending coalescing state
-    power_save_enabled: Option<bool>,  // Track current power save state
-    power_save_stable_ticks: u32,      // Hysteresis for power save changes
-    pending_power_save: Option<bool>,  // Pending power save state
+    coalescing_stable_ticks: u32,
+    pending_coalescing: Option<bool>,
+    power_save_enabled: Option<bool>,
+    power_save_stable_ticks: u32,
+    pending_power_save: Option<bool>,
+    /// Last known bytes for throughput calculation
+    last_rx_bytes: u64,
+    last_tx_bytes: u64,
+    last_stats_time: Option<Instant>,
 }
 
 impl InterfaceState {
@@ -46,9 +51,11 @@ impl InterfaceState {
         Self {
             pps_monitor: PpsMonitor::new(),
             tc_manager: TcManager::new(
-                config.cake_ema_alpha,
+                config.cake_median_window,
                 config.cake_change_threshold_mbit,
                 config.cake_change_threshold_pct,
+                config.cake_hysteresis_up,
+                config.cake_hysteresis_down,
             ),
             roam_candidate: None,
             game_mode_until: None,
@@ -58,6 +65,9 @@ impl InterfaceState {
             power_save_enabled: None,
             power_save_stable_ticks: 0,
             pending_power_save: None,
+            last_rx_bytes: 0,
+            last_tx_bytes: 0,
+            last_stats_time: None,
         }
     }
 }
@@ -132,30 +142,64 @@ impl Governor {
                 );
             }
 
-            // 3. Game Mode Detection (PPS)
+            // 3. Game Mode Detection (PPS) - with CAKE freezing
             if self.config.game_mode_enabled {
                 let pps_threshold = self.config.game_mode_pps_threshold;
                 let cooldown_secs = self.config.game_mode_cooldown_secs;
+                let freeze_cake = self.config.game_mode_freeze_cake;
+                
                 if let Some(state) = self.interface_states.get_mut(&interface) {
                     let pps = state.pps_monitor.sample(&interface);
+                    let was_in_game = state.game_mode_until
+                        .map(|until| Instant::now() < until)
+                        .unwrap_or(false);
+                    
                     if pps > pps_threshold {
                         let cooldown = Duration::from_secs(cooldown_secs);
                         state.game_mode_until = Some(Instant::now() + cooldown);
-                        debug!("Game mode activated: {} PPS on {} (cooldown: {}s)", 
-                               pps, interface, cooldown_secs);
+                        
+                        // Freeze CAKE when entering game mode
+                        if freeze_cake && !was_in_game {
+                            state.tc_manager.enter_game_mode();
+                            info!("Game mode ACTIVATED: {} PPS on {} (CAKE frozen)", pps, interface);
+                        } else {
+                            debug!("Game mode extended: {} PPS on {}", pps, interface);
+                        }
+                    } else if was_in_game {
+                        // Check if cooldown expired
+                        let still_in_game = state.game_mode_until
+                            .map(|until| Instant::now() < until)
+                            .unwrap_or(false);
+                        
+                        if !still_in_game && freeze_cake {
+                            state.tc_manager.exit_game_mode();
+                            info!("Game mode ENDED on {} (CAKE unfrozen)", interface);
+                        }
                     }
                 }
             }
 
-            // 4. Breathing CAKE (Dynamic QoS)
-            if self.config.breathing_cake_enabled && bitrate > 0 {
-                if let Some(state) = self.interface_states.get_mut(&interface) {
-                    // Convert Kbit to Mbit and scale using overhead factor (default 0.85)
-                    let bitrate_mbit = bitrate / 1000;
-                    let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
-                    
-                    if state.tc_manager.update_bandwidth(scaled_mbit) {
-                        let _ = state.tc_manager.apply_cake(&interface, scaled_mbit);
+            // 4. Breathing CAKE (Dynamic QoS) with throughput monitoring
+            if self.config.breathing_cake_enabled {
+                // Get bitrate - try NetworkManager first, fallback to iw
+                let effective_bitrate = if bitrate > 0 {
+                    bitrate
+                } else {
+                    Self::get_bitrate_from_iw(&interface).unwrap_or(0)
+                };
+                
+                if effective_bitrate > 0 {
+                    if let Some(state) = self.interface_states.get_mut(&interface) {
+                        // Update throughput estimate from actual traffic
+                        Self::update_throughput_estimate(state, &interface);
+                        
+                        // Convert Kbit to Mbit and scale using overhead factor (default 0.85)
+                        let bitrate_mbit = effective_bitrate / 1000;
+                        let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
+                        
+                        if state.tc_manager.update_bandwidth(scaled_mbit) {
+                            let _ = state.tc_manager.apply_cake(&interface);
+                        }
                     }
                 }
             }
@@ -331,5 +375,74 @@ impl Governor {
         for (interface, state) in &self.interface_states {
             let _ = state.tc_manager.remove_cake(interface);
         }
+    }
+
+    /// Fallback: Get bitrate from `iw` when NetworkManager reports 0
+    fn get_bitrate_from_iw(interface: &str) -> Option<u32> {
+        let output = Command::new("iw")
+            .args(["dev", interface, "link"])
+            .output()
+            .ok()?;
+        
+        if !output.status.success() {
+            return None;
+        }
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        
+        // Parse "tx bitrate: 866.7 MBit/s" or similar
+        for line in stdout.lines() {
+            if line.contains("tx bitrate:") {
+                // Extract the number
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                for (i, part) in parts.iter().enumerate() {
+                    if *part == "bitrate:" && i + 1 < parts.len() {
+                        if let Ok(mbit) = parts[i + 1].parse::<f64>() {
+                            // Convert to Kbit for consistency with NM
+                            debug!("iw fallback: {}Mbit on {}", mbit, interface);
+                            return Some((mbit * 1000.0) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+
+    /// Update throughput estimate from /sys/class/net statistics
+    fn update_throughput_estimate(state: &mut InterfaceState, interface: &str) {
+        let rx_path = format!("/sys/class/net/{}/statistics/rx_bytes", interface);
+        let tx_path = format!("/sys/class/net/{}/statistics/tx_bytes", interface);
+        
+        let rx_bytes = std::fs::read_to_string(&rx_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let tx_bytes = std::fs::read_to_string(&tx_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        
+        let now = Instant::now();
+        
+        if let Some(last_time) = state.last_stats_time {
+            let elapsed = now.duration_since(last_time).as_secs_f64();
+            if elapsed > 0.5 {
+                let rx_delta = rx_bytes.saturating_sub(state.last_rx_bytes);
+                let tx_delta = tx_bytes.saturating_sub(state.last_tx_bytes);
+                let total_bytes = rx_delta + tx_delta;
+                let bytes_per_sec = (total_bytes as f64 / elapsed) as u64;
+                
+                // Only update if there's meaningful traffic (>100KB/s)
+                if bytes_per_sec > 100_000 {
+                    state.tc_manager.update_throughput(bytes_per_sec);
+                }
+            }
+        }
+        
+        state.last_rx_bytes = rx_bytes;
+        state.last_tx_bytes = tx_bytes;
+        state.last_stats_time = Some(now);
     }
 }

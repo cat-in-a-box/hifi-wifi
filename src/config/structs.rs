@@ -115,14 +115,18 @@ impl Default for BackendConfig {
 pub struct GovernorConfig {
     /// Enable dynamic CAKE bandwidth adjustment
     pub breathing_cake_enabled: bool,
-    /// EMA alpha for bandwidth smoothing (0.0-1.0)
-    pub cake_ema_alpha: f64,
+    /// Median filter window size (samples)
+    pub cake_median_window: usize,
     /// Minimum bandwidth change to trigger CAKE update (Mbit)
     pub cake_change_threshold_mbit: u32,
     /// Minimum percentage change to trigger CAKE update
     pub cake_change_threshold_pct: f64,
     /// Overhead factor for CAKE bandwidth (0.0-1.0, default 0.85)
     pub cake_overhead_factor: f64,
+    /// Hysteresis ticks for bandwidth INCREASES (slow, prevents oscillation)
+    pub cake_hysteresis_up: u32,
+    /// Hysteresis ticks for bandwidth DECREASES (fast, prevents bufferbloat)
+    pub cake_hysteresis_down: u32,
     
     /// Enable game mode detection via PPS
     pub game_mode_enabled: bool,
@@ -130,6 +134,8 @@ pub struct GovernorConfig {
     pub game_mode_pps_threshold: u64,
     /// Game mode cooldown in seconds
     pub game_mode_cooldown_secs: u64,
+    /// Freeze CAKE during game mode (prevents mid-game jitter)
+    pub game_mode_freeze_cake: bool,
     
     /// Enable smart band steering
     pub band_steering_enabled: bool,
@@ -149,22 +155,25 @@ impl Default for GovernorConfig {
     fn default() -> Self {
         Self {
             breathing_cake_enabled: true,
-            cake_ema_alpha: 0.1,              // Reduced from 0.3 for smoother transitions
-            cake_change_threshold_mbit: 25,   // Increased from 5 to prevent jitter
-            cake_change_threshold_pct: 0.20,  // Increased from 10% to 20%
-            cake_overhead_factor: 0.85,       // 85% of link bandwidth for optimal bufferbloat control
+            cake_median_window: 3,             // 3 samples = 6 seconds (reduced from 5)
+            cake_change_threshold_mbit: 15,    // Reduced from 25 for better responsiveness
+            cake_change_threshold_pct: 0.15,   // Reduced from 20% to 15%
+            cake_overhead_factor: 0.85,        // 85% of link bandwidth
+            cake_hysteresis_up: 3,             // 3 ticks (6 sec) for increases
+            cake_hysteresis_down: 1,           // 1 tick (2 sec) for decreases - FAST
             
             game_mode_enabled: true,
-            game_mode_pps_threshold: 200,     // Per rewrite.md
-            game_mode_cooldown_secs: 30,      // Per rewrite.md
+            game_mode_pps_threshold: 200,
+            game_mode_cooldown_secs: 30,
+            game_mode_freeze_cake: true,       // NEW: Freeze CAKE during gaming
             
             band_steering_enabled: true,
-            roam_hysteresis_ticks: 3,         // Per rewrite.md: 3 ticks (6 seconds)
+            roam_hysteresis_ticks: 3,
             
             cpu_coalescing_enabled: true,
-            cpu_coalescing_threshold: 0.90,   // Per rewrite.md: 90%
+            cpu_coalescing_threshold: 0.90,
             
-            cpu_avg_window_size: 3,           // Per rewrite.md
+            cpu_avg_window_size: 3,
         }
     }
 }

@@ -213,8 +213,11 @@ options mwifiex disable_auto_ds=1
         let interrupts = fs::read_to_string("/proc/interrupts")
             .context("Failed to read /proc/interrupts")?;
 
+        // Special mappings for drivers that report different names in /proc/interrupts
+        let search_term = if ifc.driver == "rtl8192ee" { "rtl_pci" } else { &ifc.driver };
+
         let irq = interrupts.lines()
-            .find(|line| line.contains(&ifc.driver) || line.contains(&ifc.name))
+            .find(|line| line.contains(search_term) || line.contains(&ifc.name))
             .and_then(|line| line.trim().split(':').next())
             .map(|s| s.trim().to_string());
 

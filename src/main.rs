@@ -388,22 +388,35 @@ async fn run_status_async() -> Result<()> {
 
         // IRQ Affinity
         let irq_out = std::fs::read_to_string("/proc/interrupts").unwrap_or_default();
-        let irq_line = irq_out.lines().find(|l| l.contains(&ifc.driver) || l.contains(&ifc.name));
-        let irq_status = if let Some(line) = irq_line {
-             let irq_num = line.trim().split(':').next().unwrap_or("?");
-             // Check affinity (try hex or decimal)
-             if let Ok(affinity) = std::fs::read_to_string(format!("/proc/irq/{}/smp_affinity", irq_num)) {
-                 let aff = affinity.trim();
-                 if aff == "2" || aff == "00000002" || aff == "02" {
-                     format!("{}[OPTIMIZED]{} (CPU 1)", GREEN, NC)
-                 } else {
-                     format!("{}[DEFAULT]{} (Mask: {})", YELLOW, NC, aff)
-                 }
-             } else {
-                 format!("{}[UNKNOWN]{}", DIM, NC)
-             }
+        
+        // USB devices don't have dedicated IRQs we can pin easily
+        let is_usb = ifc.driver.contains("usb") || ifc.name.contains("usb") || ifc.driver.starts_with("rt2800usb");
+
+        let irq_status = if is_usb {
+             format!("{}[N/A]{} (USB Device)", DIM, NC)
         } else {
-             format!("{}[NOT FOUND]{}", DIM, NC)
+            // Special mappings for drivers that report different names in /proc/interrupts
+            let search_term = if ifc.driver == "rtl8192ee" { "rtl_pci" } else { &ifc.driver };
+
+            let irq_line = irq_out.lines().find(|l| l.contains(search_term) || l.contains(&ifc.name));
+            if let Some(line) = irq_line {
+                 let irq_num = line.trim().split(':').next().unwrap_or("?");
+                 // Check affinity (try hex or decimal)
+                 if let Ok(affinity) = std::fs::read_to_string(format!("/proc/irq/{}/smp_affinity", irq_num)) {
+                     let aff = affinity.trim();
+                     // Check if it's pinned to CPU1 (mask 0x2 in various formats)
+                     let is_cpu1 = aff == "2" || aff == "02" || aff == "00000002" || aff == "000002";
+                     if is_cpu1 {
+                         format!("{}[OPTIMIZED]{} (CPU 1)", GREEN, NC)
+                     } else {
+                         format!("{}[DEFAULT]{} (Mask: {})", YELLOW, NC, aff)
+                     }
+                 } else {
+                     format!("{}[UNKNOWN]{}", DIM, NC)
+                 }
+            } else {
+                 format!("{}[NOT FOUND]{}", DIM, NC)
+            }
         };
         println!("{}│{}    └─ IRQ Pin:    {}", BLUE, NC, irq_status);
         println!("{}│{}", BLUE, NC);
