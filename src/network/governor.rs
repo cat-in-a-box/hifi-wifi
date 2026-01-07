@@ -15,6 +15,7 @@ use crate::config::structs::{GovernorConfig, WifiConfig};
 use crate::network::nm::NmClient;
 use crate::network::tc::{TcManager, EthtoolManager};
 use crate::network::stats::PpsMonitor;
+use crate::network::wifi::WifiManager;
 use crate::system::cpu::CpuMonitor;
 use crate::system::power::PowerManager;
 
@@ -33,6 +34,7 @@ struct InterfaceState {
     roam_candidate: Option<RoamCandidate>,
     game_mode_until: Option<Instant>,
     coalescing_enabled: bool,
+    power_save_enabled: Option<bool>, // Track current power save state
 }
 
 impl InterfaceState {
@@ -47,6 +49,7 @@ impl InterfaceState {
             roam_candidate: None,
             game_mode_until: None,
             coalescing_enabled: false,
+            power_save_enabled: None,
         }
     }
 }
@@ -58,6 +61,7 @@ pub struct Governor {
     nm_client: NmClient,
     cpu_monitor: CpuMonitor,
     power_manager: PowerManager,
+    wifi_manager: WifiManager,
     interface_states: std::collections::HashMap<String, InterfaceState>,
 }
 
@@ -67,6 +71,7 @@ impl Governor {
         let nm_client = NmClient::new().await?;
         let cpu_monitor = CpuMonitor::new(config.cpu_avg_window_size);
         let power_manager = PowerManager::new();
+        let wifi_manager = WifiManager::new()?;
         
         Ok(Self {
             config,
@@ -74,6 +79,7 @@ impl Governor {
             nm_client,
             cpu_monitor,
             power_manager,
+            wifi_manager,
             interface_states: std::collections::HashMap::new(),
         })
     }
@@ -175,6 +181,32 @@ impl Governor {
                                    interface, in_game, cpu_load * 100.0);
                         }
                         state.coalescing_enabled = should_coalesce;
+                    }
+                }
+            }
+
+            // 5b. Power Save Management (Adaptive)
+            {
+                let should_enable = self.power_manager.should_enable_power_save();
+                
+                if let Some(state) = self.interface_states.get_mut(&interface) {
+                    // Only update if state changed (avoid unnecessary iw calls)
+                    if state.power_save_enabled != Some(should_enable) {
+                        // Get WifiInterface for this interface name
+                        let wifi_interfaces = self.wifi_manager.interfaces();
+                        if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
+                            if should_enable {
+                                if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
+                                    info!("Power save ENABLED on {} (battery mode)", interface);
+                                    state.power_save_enabled = Some(true);
+                                }
+                            } else {
+                                if let Ok(_) = self.wifi_manager.disable_power_save(wifi_ifc) {
+                                    info!("Power save DISABLED on {} (AC/Desktop mode)", interface);
+                                    state.power_save_enabled = Some(false);
+                                }
+                            }
+                        }
                     }
                 }
             }
