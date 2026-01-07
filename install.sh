@@ -109,8 +109,19 @@ fi
 echo -e "${BLUE}[2/3] Building release binary...${NC}"
 echo "Building as user: $REAL_USER"
 
+# Resolve absolute path to cargo to survive sudo PATH reset
+if [[ -x "$REAL_HOME/.cargo/bin/cargo" ]]; then
+    CARGO_EXEC="$REAL_HOME/.cargo/bin/cargo"
+elif command -v cargo &> /dev/null; then
+    CARGO_EXEC=$(command -v cargo)
+else
+    # Should not happen as we verified it above
+    echo -e "${RED}Error: Unexpectedly lost track of cargo binary.${NC}"
+    exit 1
+fi
+
 # Run build as the real user to avoid root-owned target artifacts
-as_user cargo build --release
+as_user "$CARGO_EXEC" build --release
 
 if [[ ! -f "target/release/hifi-wifi" ]]; then
     # Fallback: try building as current user if as_user failed for some permission reason
