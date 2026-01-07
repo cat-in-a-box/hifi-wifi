@@ -121,7 +121,7 @@ pub struct GovernorConfig {
     pub cake_change_threshold_mbit: u32,
     /// Minimum percentage change to trigger CAKE update
     pub cake_change_threshold_pct: f64,
-    /// Overhead factor for CAKE bandwidth (0.0-1.0, default 0.70)
+    /// Overhead factor for CAKE bandwidth (0.0-1.0, default 0.85)
     pub cake_overhead_factor: f64,
     
     /// Enable game mode detection via PPS
@@ -152,7 +152,7 @@ impl Default for GovernorConfig {
             cake_ema_alpha: 0.1,              // Reduced from 0.3 for smoother transitions
             cake_change_threshold_mbit: 25,   // Increased from 5 to prevent jitter
             cake_change_threshold_pct: 0.20,  // Increased from 10% to 20%
-            cake_overhead_factor: 0.70,       // Conservative default for real throughput
+            cake_overhead_factor: 0.85,       // 85% of link bandwidth for optimal bufferbloat control
             
             game_mode_enabled: true,
             game_mode_pps_threshold: 200,     // Per rewrite.md

@@ -150,7 +150,7 @@ impl Governor {
             // 4. Breathing CAKE (Dynamic QoS)
             if self.config.breathing_cake_enabled && bitrate > 0 {
                 if let Some(state) = self.interface_states.get_mut(&interface) {
-                    // Convert Kbit to Mbit and scale using overhead factor (default 0.70)
+                    // Convert Kbit to Mbit and scale using overhead factor (default 0.85)
                     let bitrate_mbit = bitrate / 1000;
                     let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
                     
