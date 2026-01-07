@@ -39,14 +39,22 @@ if [[ "$ID" == "steamos" || "$ID_LIKE" == *"arch"* ]]; then
         if [[ $EUID -ne 0 ]]; then
             echo -e "${BLUE}Requesting sudo to install build dependencies (pacman)...${NC}"
             sudo steamos-readonly disable || true
+            # Wait for filesystem to become writable
+            sleep 2
             sudo pacman-key --init
             sudo pacman-key --populate archlinux holo 2>/dev/null || sudo pacman-key --populate archlinux
             sudo pacman -S --noconfirm --needed base-devel glibc linux-api-headers
+            # Re-enable readonly for safety
+            sudo steamos-readonly enable || true
         else
             steamos-readonly disable || true
+            # Wait for filesystem to become writable
+            sleep 2
             pacman-key --init
             pacman-key --populate archlinux holo 2>/dev/null || pacman-key --populate archlinux
             pacman -S --noconfirm --needed base-devel glibc linux-api-headers
+            # Re-enable readonly for safety
+            steamos-readonly enable || true
         fi
     fi
 fi
@@ -125,7 +133,17 @@ if systemctl is-active --quiet hifi-wifi 2>/dev/null; then
 fi
 
 $RUN_AS_ROOT ./target/release/hifi-wifi install
-$RUN_AS_ROOT /var/lib/hifi-wifi/hifi-wifi apply
+
+# Verify symlink exists and use absolute path if needed
+if [[ -L /usr/local/bin/hifi-wifi ]]; then
+    HIFI_CMD="hifi-wifi"
+else
+    echo -e "${BLUE}Using direct binary path (symlink not yet in PATH)${NC}"
+    H-e "${BLUE}Note:${NC} You may need to start a new shell or run: ${BLUE}hash -r${NC}"
+echo IFI_CMD="/var/lib/hifi-wifi/hifi-wifi"
+fi
+
+$RUN_AS_ROOT $HIFI_CMD apply
 
 echo -e "${GREEN}Success! hifi-wifi v3.0 is installed and active.${NC}"
 echo ""

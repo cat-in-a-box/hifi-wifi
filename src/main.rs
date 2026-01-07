@@ -5,7 +5,7 @@ mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use log::{info, error};
+use log::{info, error, warn};
 
 use crate::config::loader::load_config;
 use crate::network::wifi::WifiManager;
@@ -514,6 +514,18 @@ WantedBy=multi-user.target
     
     let mut file = File::create(service_path)?;
     file.write_all(service_content.as_bytes())?;
+
+    // Create systemd preset to survive SteamOS updates
+    let preset_dir = std::path::Path::new("/etc/systemd/system-preset");
+    if let Err(e) = fs::create_dir_all(preset_dir) {
+        warn!("Could not create preset directory: {}", e);
+    } else {
+        let preset_path = preset_dir.join("99-hifi-wifi.preset");
+        if let Ok(mut preset_file) = File::create(&preset_path) {
+            let _ = preset_file.write_all(b"enable hifi-wifi.service\n");
+            info!("Created systemd preset for automatic enable");
+        }
+    }
 
     // Reload systemd and enable service
     info!("Enabling service...");
