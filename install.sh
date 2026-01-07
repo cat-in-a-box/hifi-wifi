@@ -61,10 +61,11 @@ echo -e "${BLUE}=== hifi-wifi v3.0 Installer ===${NC}"
 # 1. Rust Detection & Installation
 echo -e "${BLUE}[1/3] Checking Rust toolchain...${NC}"
 
-# Try to find cargo in PATH or common user locations
-export PATH="$REAL_HOME/.cargo/bin:$PATH"
+# Look for cargo directly in the user's home, not via PATH
+CARGO_BIN="$REAL_HOME/.cargo/bin/cargo"
+RUSTUP_BIN="$REAL_HOME/.cargo/bin/rustup"
 
-if ! command -v cargo &> /dev/null; then
+if [[ ! -x "$CARGO_BIN" ]]; then
     echo -e "${BLUE}Rust not found. Auto-installing for user $REAL_USER...${NC}"
     
     # Check for curl
@@ -73,60 +74,40 @@ if ! command -v cargo &> /dev/null; then
         exit 1
     fi
 
-    # Install Rust (non-interactive)
+    # Install Rust (non-interactive) as the real user
     as_user curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | as_user sh -s -- -y
     
-    # Source the environment immediately
-    if [ -f "$REAL_HOME/.cargo/env" ]; then
-        source "$REAL_HOME/.cargo/env"
+    # Verify installation
+    if [[ ! -x "$CARGO_BIN" ]]; then
+        echo -e "${RED}Rust installation failed. Please install manually.${NC}"
+        exit 1
     fi
 else
-    echo -e "${GREEN}Rust detected.${NC}"
+    echo -e "${GREEN}Rust detected at $CARGO_BIN${NC}"
     # Attempt to fix broken installs
-    if ! cargo --version &> /dev/null; then
-        echo -e "${BLUE}Cargo detected but seems broken. Attempting repair...${NC}"
-        as_user "$REAL_HOME/.cargo/bin/rustup" self update
-        as_user "$REAL_HOME/.cargo/bin/rustup" default stable
+    if ! as_user "$CARGO_BIN" --version &> /dev/null; then
+        echo -e "${BLUE}Cargo seems broken. Attempting repair...${NC}"
+        as_user "$RUSTUP_BIN" self update 2>/dev/null || true
+        as_user "$RUSTUP_BIN" default stable 2>/dev/null || true
     fi
 fi
 
-# Verify cargo works now
-if ! command -v cargo &> /dev/null; then
-    # Fallback check for ~/.cargo/bin/cargo explicit existence
-    if [[ -x "$REAL_HOME/.cargo/bin/cargo" ]]; then
-       export PATH="$REAL_HOME/.cargo/bin:$PATH"
-    else
-       echo -e "${RED}Failed to configure Rust. Please install manually.${NC}"
-       exit 1
-    fi
+# Final verification
+if ! as_user "$CARGO_BIN" --version &> /dev/null; then
+    echo -e "${RED}Cargo is not working. Please install Rust manually.${NC}"
+    exit 1
 fi
 
 # 2. Build Phase
 echo -e "${BLUE}[2/3] Building release binary...${NC}"
-echo "Building as user: $REAL_USER"
+echo "Building as user: $REAL_USER with cargo: $CARGO_BIN"
 
-# Resolve absolute path to cargo to survive sudo PATH reset
-if [[ -x "$REAL_HOME/.cargo/bin/cargo" ]]; then
-    CARGO_EXEC="$REAL_HOME/.cargo/bin/cargo"
-elif command -v cargo &> /dev/null; then
-    CARGO_EXEC=$(command -v cargo)
-else
-    echo -e "${RED}Error: Unexpectedly lost track of cargo binary.${NC}"
-    exit 1
-fi
-
-# Run build as the real user to avoid root-owned target artifacts
-as_user "$CARGO_EXEC" build --release
+# Build as the real user
+as_user "$CARGO_BIN" build --release
 
 if [[ ! -f "target/release/hifi-wifi" ]]; then
-    echo "Retrying build as current user..."
-    "$CARGO_EXEC" build --release
-    
-    # If still not found, check if maybe "cargo install" path was used or different layout
-    if [[ ! -f "target/release/hifi-wifi" ]]; then
-        echo -e "${RED}Build failed! Binary not found in target/release/.${NC}"
-        exit 1
-    fi
+    echo -e "${RED}Build failed! Binary not found in target/release/.${NC}"
+    exit 1
 fi
 
 # 3. Install Phase (Needs root)
