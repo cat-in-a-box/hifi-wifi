@@ -128,4 +128,9 @@ $RUN_AS_ROOT ./target/release/hifi-wifi install
 $RUN_AS_ROOT /var/lib/hifi-wifi/hifi-wifi apply
 
 echo -e "${GREEN}Success! hifi-wifi v3.0 is installed and active.${NC}"
-echo -e "Monitor with: ${BLUE}/var/lib/hifi-wifi/hifi-wifi status${NC}"
+echo ""
+echo -e "The ${BLUE}hifi-wifi${NC} command is now available system-wide."
+echo ""
+echo -e "  Check status:    ${BLUE}hifi-wifi status${NC}"
+echo -e "  Live monitoring: ${BLUE}sudo hifi-wifi monitor${NC}"
+echo -e "  Service logs:    ${BLUE}journalctl -u hifi-wifi -f${NC}"
