@@ -134,3 +134,13 @@ echo ""
 echo -e "  Check status:    ${BLUE}hifi-wifi status${NC}"
 echo -e "  Live monitoring: ${BLUE}sudo hifi-wifi monitor${NC}"
 echo -e "  Service logs:    ${BLUE}journalctl -u hifi-wifi -f${NC}"
+echo ""
+echo -e "${BLUE}Note:${NC} Most optimizations are active immediately."
+echo -e "However, driver-level tweaks (modprobe) require a reboot for full effect."
+echo ""
+read -p "Reboot now for full optimization? [Y/n] " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+    echo -e "${BLUE}Rebooting...${NC}"
+    $RUN_AS_ROOT reboot
+fi
