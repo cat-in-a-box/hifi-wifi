@@ -8,18 +8,18 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 # Detect real user if running as sudo to build as user (not root)
-if [ -n "" ]; then
-    REAL_USER=
-    REAL_HOME=$(getent passwd $SUDO_USER | cut -d: -f6)
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER=$SUDO_USER
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
     REAL_USER=$(whoami)
     REAL_HOME=$HOME
 fi
 
-# Helper to run commands as the non-root user
+# Helper to run commands as the non-root user WITH environment variables preserved
 as_user() {
     if [ "$USER" != "$REAL_USER" ]; then
-        sudo -u "$REAL_USER" "$@"
+        sudo -u "$REAL_USER" HOME="$REAL_HOME" PATH="$REAL_HOME/.cargo/bin:$PATH" "$@"
     else
         "$@"
     fi
