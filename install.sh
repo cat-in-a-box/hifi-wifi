@@ -42,37 +42,59 @@ if [[ "$ID" == "steamos" || "$ID_LIKE" == *"arch"* ]]; then
             exit 1
         fi
         
-        echo -e "${BLUE}[SteamOS] Checking for system extensions...${NC}"
-        if systemd-sysext status 2>/dev/null | grep -q "merged"; then
-            echo -e "${BLUE}[SteamOS] Unmerging system extensions...${NC}"
-            systemd-sysext unmerge || true
-            sleep 1
-        fi
+        echo -e "${BLUE}[SteamOS] Unmerging system extensions (if any)...${NC}"
+        # Always try to unmerge, ignore errors if none exist
+        systemd-sysext unmerge 2>/dev/null || true
+        sleep 1
         
         echo -e "${BLUE}[SteamOS] Disabling readonly filesystem...${NC}"
-        steamos-readonly disable
+        steamos-readonly disable 2>&1 | grep -v "Warning:" || true
         sleep 2
         
-        # Verify filesystem is writable
-        if mount | grep -q "/ type btrfs.*ro,"; then
-            echo -e "${RED}Filesystem is still read-only after disable!${NC}"
-            echo -e "You may need to reboot and try again."
-            exit 1
+        # Double-check: try to write to a test location
+        if ! touch /usr/test-write 2>/dev/null; then
+            echo -e "${RED}Filesystem is still not writable!${NC}"
+            echo -e "${YELLOW}Attempting aggressive unmerge...${NC}"
+            
+            # Force unmerge all possible overlays
+            systemd-sysext unmerge 2>/dev/null || true
+            sleep 2
+            
+            # Try disable again
+            steamos-readonly disable 2>&1 | grep -v "Warning:" || true
+            sleep 2
+            
+            # Final check
+            if ! touch /usr/test-write 2>/dev/null; then
+                echo -e "${RED}Still cannot write to filesystem after multiple attempts.${NC}"
+                echo -e "${BLUE}Please reboot and try again. Sometimes SteamOS requires a reboot${NC}"
+                echo -e "${BLUE}after system updates before modifications are possible.${NC}"
+                exit 1
+            fi
         fi
+        rm -f /usr/test-write 2>/dev/null
         
         echo -e "${BLUE}[SteamOS] Initializing pacman...${NC}"
         if [[ ! -f /etc/pacman.d/gnupg/trustdb.gpg ]]; then
-            pacman-key --init
+            pacman-key --init 2>&1 | grep -v "^gpg:"
         fi
         
         echo -e "${BLUE}[SteamOS] Populating pacman keys...${NC}"
-        pacman-key --populate archlinux holo 2>/dev/null || pacman-key --populate archlinux
+        pacman-key --populate archlinux holo 2>&1 | grep -v "^==>" || pacman-key --populate archlinux 2>&1 | grep -v "^==>"
         
         echo -e "${BLUE}[SteamOS] Syncing package database...${NC}"
-        pacman -Sy
+        if ! pacman -Sy 2>&1; then
+            echo -e "${RED}Package database sync failed!${NC}"
+            echo -e "${YELLOW}This usually means the filesystem is still read-only somewhere.${NC}"
+            echo -e "${BLUE}Try: Reboot your Steam Deck and run the installer again.${NC}"
+            exit 1
+        fi
         
         echo -e "${BLUE}[SteamOS] Installing build dependencies...${NC}"
-        pacman -S --noconfirm --needed base-devel glibc linux-api-headers
+        if ! pacman -S --noconfirm --needed base-devel glibc linux-api-headers; then
+            echo -e "${RED}Package installation failed!${NC}"
+            exit 1
+        fi
         
         echo -e "${GREEN}[SteamOS] Build environment ready!${NC}"
     fi
