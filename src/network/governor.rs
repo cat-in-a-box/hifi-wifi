@@ -34,7 +34,11 @@ struct InterfaceState {
     roam_candidate: Option<RoamCandidate>,
     game_mode_until: Option<Instant>,
     coalescing_enabled: bool,
-    power_save_enabled: Option<bool>, // Track current power save state
+    coalescing_stable_ticks: u32,      // Hysteresis for coalescing changes
+    pending_coalescing: Option<bool>,  // Pending coalescing state
+    power_save_enabled: Option<bool>,  // Track current power save state
+    power_save_stable_ticks: u32,      // Hysteresis for power save changes
+    pending_power_save: Option<bool>,  // Pending power save state
 }
 
 impl InterfaceState {
@@ -49,7 +53,11 @@ impl InterfaceState {
             roam_candidate: None,
             game_mode_until: None,
             coalescing_enabled: false,
+            coalescing_stable_ticks: 0,
+            pending_coalescing: None,
             power_save_enabled: None,
+            power_save_stable_ticks: 0,
+            pending_power_save: None,
         }
     }
 }
@@ -142,16 +150,17 @@ impl Governor {
             // 4. Breathing CAKE (Dynamic QoS)
             if self.config.breathing_cake_enabled && bitrate > 0 {
                 if let Some(state) = self.interface_states.get_mut(&interface) {
-                    // Scale PHY bitrate using overhead factor (default 0.70)
-                    let scaled_bitrate = (bitrate as f64 * self.config.cake_overhead_factor) as u32;
+                    // Convert Kbit to Mbit and scale using overhead factor (default 0.70)
+                    let bitrate_mbit = bitrate / 1000;
+                    let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
                     
-                    if state.tc_manager.update_bandwidth(scaled_bitrate) {
-                        let _ = state.tc_manager.apply_cake(&interface, scaled_bitrate);
+                    if state.tc_manager.update_bandwidth(scaled_mbit) {
+                        let _ = state.tc_manager.apply_cake(&interface, scaled_mbit);
                     }
                 }
             }
 
-            // 5. CPU Governor (Smart Coalescing)
+            // 5. CPU Governor (Smart Coalescing) - with hysteresis to prevent jitter
             if self.config.cpu_coalescing_enabled {
                 let threshold = self.config.cpu_coalescing_threshold;
                 let on_battery = self.power_manager.should_enable_power_save();
@@ -170,43 +179,76 @@ impl Governor {
                         true // Idle or battery
                     };
 
+                    // Hysteresis: require 2 stable ticks before changing coalescing state
                     if should_coalesce != state.coalescing_enabled {
-                        if should_coalesce {
-                            let _ = EthtoolManager::enable_coalescing(&interface);
-                            debug!("Coalescing ENABLED on {} (game:{}, cpu:{:.0}%, battery:{})",
-                                   interface, in_game, cpu_load * 100.0, on_battery);
+                        if state.pending_coalescing == Some(should_coalesce) {
+                            state.coalescing_stable_ticks += 1;
                         } else {
-                            let _ = EthtoolManager::disable_coalescing(&interface);
-                            debug!("Coalescing DISABLED on {} (game:{}, cpu:{:.0}%)",
-                                   interface, in_game, cpu_load * 100.0);
+                            state.pending_coalescing = Some(should_coalesce);
+                            state.coalescing_stable_ticks = 1;
                         }
-                        state.coalescing_enabled = should_coalesce;
+                        
+                        // Apply after 2 stable ticks (4 seconds)
+                        if state.coalescing_stable_ticks >= 2 {
+                            if should_coalesce {
+                                let _ = EthtoolManager::enable_coalescing(&interface);
+                                debug!("Coalescing ENABLED on {} (game:{}, cpu:{:.0}%, battery:{})",
+                                       interface, in_game, cpu_load * 100.0, on_battery);
+                            } else {
+                                let _ = EthtoolManager::disable_coalescing(&interface);
+                                debug!("Coalescing DISABLED on {} (game:{}, cpu:{:.0}%)",
+                                       interface, in_game, cpu_load * 100.0);
+                            }
+                            state.coalescing_enabled = should_coalesce;
+                            state.pending_coalescing = None;
+                            state.coalescing_stable_ticks = 0;
+                        }
+                    } else {
+                        // State matches, reset pending
+                        state.pending_coalescing = None;
+                        state.coalescing_stable_ticks = 0;
                     }
                 }
             }
 
-            // 5b. Power Save Management (Adaptive)
+            // 5b. Power Save Management (Adaptive) - with hysteresis to prevent flapping
             {
                 let should_enable = self.power_manager.should_enable_power_save();
                 
                 if let Some(state) = self.interface_states.get_mut(&interface) {
-                    // Only update if state changed (avoid unnecessary iw calls)
+                    // Hysteresis: require 3 stable ticks before changing power save
+                    // This prevents AC/battery flapping from causing jitter
                     if state.power_save_enabled != Some(should_enable) {
-                        // Get WifiInterface for this interface name
-                        let wifi_interfaces = self.wifi_manager.interfaces();
-                        if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
-                            if should_enable {
-                                if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
-                                    info!("Power save ENABLED on {} (battery mode)", interface);
-                                    state.power_save_enabled = Some(true);
-                                }
-                            } else {
-                                if let Ok(_) = self.wifi_manager.disable_power_save(wifi_ifc) {
-                                    info!("Power save DISABLED on {} (AC/Desktop mode)", interface);
-                                    state.power_save_enabled = Some(false);
+                        if state.pending_power_save == Some(should_enable) {
+                            state.power_save_stable_ticks += 1;
+                        } else {
+                            state.pending_power_save = Some(should_enable);
+                            state.power_save_stable_ticks = 1;
+                        }
+                        
+                        // Apply after 3 stable ticks (6 seconds) to avoid brief AC disconnects
+                        if state.power_save_stable_ticks >= 3 {
+                            let wifi_interfaces = self.wifi_manager.interfaces();
+                            if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
+                                if should_enable {
+                                    if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
+                                        info!("Power save ENABLED on {} (battery mode)", interface);
+                                        state.power_save_enabled = Some(true);
+                                    }
+                                } else {
+                                    if let Ok(_) = self.wifi_manager.disable_power_save(wifi_ifc) {
+                                        info!("Power save DISABLED on {} (AC/Desktop mode)", interface);
+                                        state.power_save_enabled = Some(false);
+                                    }
                                 }
                             }
+                            state.pending_power_save = None;
+                            state.power_save_stable_ticks = 0;
                         }
+                    } else {
+                        // State matches, reset pending
+                        state.pending_power_save = None;
+                        state.power_save_stable_ticks = 0;
                     }
                 }
             }
