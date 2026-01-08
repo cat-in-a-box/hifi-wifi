@@ -46,6 +46,8 @@ struct InterfaceState {
     last_stats_time: Option<Instant>,
     /// Whether we have valid bandwidth data (false = CAKE disabled)
     bandwidth_valid: bool,
+    /// Last known good bitrate (Kbit/s) - used when current reading is garbage (MCS0 probes)
+    last_good_bitrate: Option<u32>,
 }
 
 impl InterfaceState {
@@ -71,6 +73,7 @@ impl InterfaceState {
             last_tx_bytes: 0,
             last_stats_time: None,
             bandwidth_valid: false,
+            last_good_bitrate: None,
         }
     }
 }
@@ -199,7 +202,7 @@ impl Governor {
                     (true, true) => (nm_bitrate + iw_bitrate) / 2,  // Average both
                     (true, false) => nm_bitrate,
                     (false, true) => iw_bitrate,
-                    (false, false) => 0,  // Both invalid - will disable CAKE
+                    (false, false) => 0,  // Both invalid - will use last known good
                 };
                 
                 if let Some(state) = self.interface_states.get_mut(&interface) {
@@ -207,6 +210,9 @@ impl Governor {
                     Self::update_throughput_estimate(state, &interface);
                     
                     if effective_bitrate > 0 {
+                        // Store as last known good bitrate
+                        state.last_good_bitrate = Some(effective_bitrate);
+                        
                         // Convert Kbit to Mbit and scale using overhead factor (default 0.85)
                         let bitrate_mbit = effective_bitrate / 1000;
                         let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
@@ -218,10 +224,23 @@ impl Governor {
                             let _ = state.tc_manager.apply_cake(&interface);
                         }
                         state.bandwidth_valid = true;
+                    } else if let Some(last_good) = state.last_good_bitrate {
+                        // Both sources invalid BUT we have a last known good value - use it
+                        // This handles MCS0 probe frames during idle periods
+                        let bitrate_mbit = last_good / 1000;
+                        let scaled_mbit = (bitrate_mbit as f64 * self.config.cake_overhead_factor) as u32;
+                        
+                        debug!("CAKE: Invalid readings (NM={}, iw={}), using last known good {}Kbit -> {}Mbit",
+                               nm_bitrate, iw_bitrate, last_good, scaled_mbit);
+                        
+                        if state.tc_manager.update_bandwidth(scaled_mbit) {
+                            let _ = state.tc_manager.apply_cake(&interface);
+                        }
+                        state.bandwidth_valid = true;
                     } else {
-                        // Both sources invalid - disable CAKE rather than guess
+                        // No current OR historical valid bitrate - disable CAKE
                         if state.bandwidth_valid {
-                            warn!("CAKE: No valid bitrate (NM={}, iw={}), disabling CAKE on {}",
+                            warn!("CAKE: No valid bitrate (NM={}, iw={}) and no last known good, disabling CAKE on {}",
                                   nm_bitrate, iw_bitrate, interface);
                             let _ = state.tc_manager.remove_cake(&interface);
                             state.bandwidth_valid = false;
