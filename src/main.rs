@@ -159,16 +159,25 @@ fn run_apply(config: &config::structs::Config) -> Result<()> {
         }
 
         // 5. Get link stats and apply CAKE
-        if let Ok(stats) = wifi_mgr.get_link_stats(ifc) {
-            let bandwidth = if stats.tx_bitrate_mbps > 0.0 {
+        // Always apply CAKE, even if we can't get link stats
+        let bandwidth = match wifi_mgr.get_link_stats(ifc) {
+            Ok(stats) if stats.tx_bitrate_mbps > 0.0 => {
+                info!("Link: {}Mbps TX, {}dBm signal", stats.tx_bitrate_mbps, stats.signal_dbm);
                 // Use 60% of link rate for realistic Wi-Fi throughput
                 (stats.tx_bitrate_mbps * 0.60) as u32
-            } else {
-                200 // Default fallback
-            };
-            
-            info!("Link: {}Mbps TX, {}dBm signal", stats.tx_bitrate_mbps, stats.signal_dbm);
-            wifi_mgr.apply_cake(ifc, bandwidth.max(1))?;
+            }
+            Ok(stats) => {
+                warn!("Link stats returned 0 bitrate (signal: {}dBm), using 200Mbit default", stats.signal_dbm);
+                200
+            }
+            Err(e) => {
+                warn!("Failed to get link stats: {}, using 200Mbit default", e);
+                200
+            }
+        };
+        
+        if let Err(e) = wifi_mgr.apply_cake(ifc, bandwidth.max(1)) {
+            error!("Failed to apply CAKE on {}: {}", ifc.name, e);
         }
     }
 
@@ -510,8 +519,8 @@ async fn run_status_async() -> Result<()> {
     let gov_status = if service_active { "Running" } else { "Stopped" };
     println!("{}│{}  Governor: {}", BLUE, NC, gov_status);
     println!("{}│{}    ├─ QoS Mode:   {}", BLUE, NC, if config.governor.breathing_cake_enabled { "Breathing CAKE (Dynamic)" } else { "Static CAKE" });
-    println!("{}│{}    ├─ Game Mode:  {}", BLUE, NC, if config.governor.game_mode_enabled { "Enabled (PPS Detection)" } else { "Disabled" });
-    println!("{}│{}    └─ Band Steer: {}", BLUE, NC, if config.governor.band_steering_enabled { "Enabled" } else { "Disabled" });
+    println!("{}│{}    ├─ Game Mode:  {}", BLUE, NC, if config.governor.game_mode_enabled { "Available (PPS > 200)" } else { "Disabled" });
+    println!("{}│{}    └─ Band Steer: {}", BLUE, NC, if config.governor.band_steering_enabled { "Available" } else { "Disabled" });
 
     println!("{}└{}", BLUE, NC);
     println!();
