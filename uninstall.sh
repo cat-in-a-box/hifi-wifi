@@ -4,6 +4,7 @@ set -e
 # Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
@@ -13,6 +14,38 @@ echo -e "${BLUE}=== hifi-wifi v3.0 Uninstaller ===${NC}"
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}This script must be run as root (sudo).${NC}"
     exit 1
+fi
+
+# Source os-release to detect distro
+IS_STEAMOS=false
+if [ -f /etc/os-release ]; then
+    source /etc/os-release
+    if [[ "$ID" == "steamos" ]]; then
+        IS_STEAMOS=true
+    fi
+fi
+
+# SteamOS: Handle read-only filesystem for /usr/local/bin
+if [[ "$IS_STEAMOS" == true ]]; then
+    echo -e "${BLUE}[SteamOS] Preparing filesystem for uninstall...${NC}"
+    
+    # Unmerge system extensions
+    systemd-sysext unmerge 2>/dev/null || true
+    sleep 1
+    
+    # Disable readonly
+    steamos-readonly disable 2>&1 | grep -v "Warning:" || true
+    sleep 1
+    
+    # Verify we can write
+    if ! touch /usr/local/bin/.test-write 2>/dev/null; then
+        echo -e "${YELLOW}Filesystem still read-only, attempting aggressive unmerge...${NC}"
+        systemd-sysext unmerge 2>/dev/null || true
+        sleep 2
+        steamos-readonly disable 2>&1 | grep -v "Warning:" || true
+        sleep 1
+    fi
+    rm -f /usr/local/bin/.test-write 2>/dev/null
 fi
 
 # 1. Stop and disable service
@@ -95,3 +128,10 @@ done
 
 echo ""
 echo -e "${GREEN}hifi-wifi has been completely uninstalled.${NC}"
+
+# SteamOS: Re-enable read-only filesystem
+if [[ "$IS_STEAMOS" == true ]]; then
+    echo -e "${BLUE}[SteamOS] Re-enabling read-only filesystem...${NC}"
+    steamos-readonly enable 2>&1 | grep -v "Warning:" || true
+    echo -e "${GREEN}Filesystem protection restored.${NC}"
+fi
