@@ -242,13 +242,29 @@ fn run_revert() -> Result<()> {
 
     let wifi_mgr = WifiManager::new()?;
     
-    // Remove CAKE qdiscs
+    // Remove CAKE qdiscs and restore defaults
     for ifc in wifi_mgr.interfaces() {
-        info!("Removing CAKE from {}", ifc.name);
+        // Only operate on connected interfaces
+        if !wifi_mgr.is_interface_connected(ifc) {
+            info!("Skipping {} (not connected)", ifc.name);
+            continue;
+        }
+        
+        info!("Reverting optimizations on {}", ifc.name);
         wifi_mgr.remove_cake(ifc)?;
         
-        // Re-enable power save (safe default)
-        wifi_mgr.enable_power_save(ifc)?;
+        // Restore power-related defaults based on interface type
+        match ifc.interface_type {
+            crate::network::wifi::InterfaceType::Wifi => {
+                // Re-enable WiFi power save (safe default)
+                let _ = wifi_mgr.enable_power_save(ifc);
+            },
+            crate::network::wifi::InterfaceType::Ethernet => {
+                // Re-enable EEE on ethernet (power saving default)
+                let _ = crate::network::tc::EthtoolManager::enable_eee(&ifc.name);
+                info!("Re-enabled EEE on {}", ifc.name);
+            }
+        }
     }
 
     // Revert system optimizations
