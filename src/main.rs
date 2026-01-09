@@ -53,6 +53,11 @@ async fn main() -> Result<()> {
     
     let cli = Cli::parse();
 
+    // Suppress INFO logs for status command (clean output)
+    if matches!(cli.command, Some(Commands::Status)) {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+
     // Root check (except for status command)
     if !matches!(cli.command, Some(Commands::Status)) && !utils::privilege::is_root() {
         error!("This application must be run as root.");
@@ -462,7 +467,7 @@ async fn run_status_async() -> Result<()> {
     println!();
 
     // 3. Interfaces & Tweaks (CAKE, Power Save)
-    let wifi_mgr = WifiManager::new()?;
+    let wifi_mgr = WifiManager::new_quiet()?;
     println!("{}{}{}┌─ Interfaces & Tweaks{}", BOLD, BLUE, NC, NC);
     
     if wifi_mgr.interfaces().is_empty() {

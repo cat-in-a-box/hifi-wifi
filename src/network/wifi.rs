@@ -48,12 +48,18 @@ pub struct WifiManager {
 
 impl WifiManager {
     pub fn new() -> Result<Self> {
-        let interfaces = Self::detect_interfaces()?;
+        let interfaces = Self::detect_interfaces(true)?;
+        Ok(Self { interfaces })
+    }
+
+    /// Create WifiManager without logging (for status display)
+    pub fn new_quiet() -> Result<Self> {
+        let interfaces = Self::detect_interfaces(false)?;
         Ok(Self { interfaces })
     }
 
     /// Detect all Wi-Fi interfaces on the system
-    fn detect_interfaces() -> Result<Vec<WifiInterface>> {
+    fn detect_interfaces(log_output: bool) -> Result<Vec<WifiInterface>> {
         let mut interfaces = Vec::new();
         
         // Read from /sys/class/net
@@ -79,12 +85,14 @@ impl WifiManager {
             let category = Self::categorize_driver(&driver);
             let is_active = Self::is_interface_active(&ifc_name);
 
-            let type_str = match interface_type {
-                InterfaceType::Wifi => "WiFi",
-                InterfaceType::Ethernet => "Ethernet",
-            };
-            info!("Detected interface: {} (type: {}, driver: {}, category: {:?})", 
-                  ifc_name, type_str, driver, category);
+            if log_output {
+                let type_str = match interface_type {
+                    InterfaceType::Wifi => "WiFi",
+                    InterfaceType::Ethernet => "Ethernet",
+                };
+                info!("Detected interface: {} (type: {}, driver: {}, category: {:?})", 
+                      ifc_name, type_str, driver, category);
+            }
 
             interfaces.push(WifiInterface {
                 name: ifc_name,
