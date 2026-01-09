@@ -40,6 +40,9 @@ struct InterfaceState {
     power_save_enabled: Option<bool>,
     power_save_stable_ticks: u32,
     pending_power_save: Option<bool>,
+    eee_enabled: Option<bool>,
+    eee_stable_ticks: u32,
+    pending_eee: Option<bool>,
     /// Last known bytes for throughput calculation
     last_rx_bytes: u64,
     last_tx_bytes: u64,
@@ -69,6 +72,9 @@ impl InterfaceState {
             power_save_enabled: None,
             power_save_stable_ticks: 0,
             pending_power_save: None,
+            eee_enabled: None,
+            eee_stable_ticks: 0,
+            pending_eee: None,
             last_rx_bytes: 0,
             last_tx_bytes: 0,
             last_stats_time: None,
@@ -356,6 +362,65 @@ impl Governor {
                         // State matches, reset pending
                         state.pending_power_save = None;
                         state.power_save_stable_ticks = 0;
+                    }
+                }
+            }
+
+            // 5c. Energy Efficient Ethernet (EEE) Management - Adaptive based on power source
+            // EEE causes 50-200us wakeup latency on ethernet, so disable for gaming/streaming
+            {
+                let base_should_enable = self.power_manager.should_enable_power_save();
+                
+                if let Some(state) = self.interface_states.get_mut(&interface) {
+                    let wifi_interfaces = self.wifi_manager.interfaces();
+                    if let Some(ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
+                        // Only manage EEE for ethernet interfaces
+                        if ifc.interface_type == crate::network::wifi::InterfaceType::Ethernet {
+                            let pps = state.pps_monitor.sample(&interface);
+                            let has_network_activity = pps > 50;
+                            
+                            let in_game = state.game_mode_until
+                                .map(|until| Instant::now() < until)
+                                .unwrap_or(false);
+                            
+                            // Enable EEE only on battery AND idle (no game, no network activity)
+                            // Otherwise disable for minimum latency
+                            let should_enable = base_should_enable && !in_game && !has_network_activity;
+                            
+                            // Hysteresis: require 3 stable ticks before changing EEE
+                            if state.eee_enabled != Some(should_enable) {
+                                if state.pending_eee == Some(should_enable) {
+                                    state.eee_stable_ticks += 1;
+                                } else {
+                                    state.pending_eee = Some(should_enable);
+                                    state.eee_stable_ticks = 1;
+                                }
+                                
+                                // Apply after 3 stable ticks (6 seconds)
+                                if state.eee_stable_ticks >= 3 {
+                                    if should_enable {
+                                        if let Ok(_) = EthtoolManager::enable_eee(&interface) {
+                                            info!("EEE ENABLED on {} (battery, idle)", interface);
+                                            state.eee_enabled = Some(true);
+                                        }
+                                    } else {
+                                        if let Ok(_) = EthtoolManager::disable_eee(&interface) {
+                                            let reason = if !base_should_enable { "AC power" }
+                                                else if in_game { "game mode" }
+                                                else { "network activity" };
+                                            info!("EEE DISABLED on {} ({})", interface, reason);
+                                            state.eee_enabled = Some(false);
+                                        }
+                                    }
+                                    state.pending_eee = None;
+                                    state.eee_stable_ticks = 0;
+                                }
+                            } else {
+                                // State matches, reset pending
+                                state.pending_eee = None;
+                                state.eee_stable_ticks = 0;
+                            }
+                        }
                     }
                 }
             }
