@@ -389,6 +389,34 @@ async fn run_monitor(config: &config::structs::Config) -> Result<()> {
     Ok(())
 }
 
+/// Convert WiFi frequency (MHz) to channel number
+fn freq_to_channel(freq: u32) -> u32 {
+    match freq {
+        // 2.4 GHz band
+        2412 => 1, 2417 => 2, 2422 => 3, 2427 => 4, 2432 => 5,
+        2437 => 6, 2442 => 7, 2447 => 8, 2452 => 9, 2457 => 10,
+        2462 => 11, 2467 => 12, 2472 => 13, 2484 => 14,
+        // 5 GHz band (common channels)
+        5180 => 36, 5200 => 40, 5220 => 44, 5240 => 48,
+        5260 => 52, 5280 => 56, 5300 => 60, 5320 => 64,
+        5500 => 100, 5520 => 104, 5540 => 108, 5560 => 112,
+        5580 => 116, 5600 => 120, 5620 => 124, 5640 => 128,
+        5660 => 132, 5680 => 136, 5700 => 140, 5720 => 144,
+        5745 => 149, 5765 => 153, 5785 => 157, 5805 => 161, 5825 => 165,
+        // 6 GHz band (common channels)
+        5955 => 1, 5975 => 5, 5995 => 9, 6015 => 13,
+        6035 => 17, 6055 => 21, 6075 => 25, 6095 => 29,
+        6115 => 33, 6135 => 37, 6155 => 41, 6175 => 45,
+        6195 => 49, 6215 => 53, 6235 => 57, 6255 => 61,
+        6275 => 65, 6295 => 69, 6315 => 73, 6335 => 77,
+        // Fallback: calculate from frequency
+        f if f >= 2400 && f <= 2500 => (f - 2407) / 5,
+        f if f >= 5150 && f <= 5900 => (f - 5000) / 5,
+        f if f >= 5925 && f <= 7125 => (f - 5950) / 5,
+        _ => 0,
+    }
+}
+
 /// Run status with async NetworkManager info
 async fn run_status_async() -> Result<()> {
     use crate::network::nm::NmClient;
@@ -598,15 +626,69 @@ async fn run_status_async() -> Result<()> {
                  for device in devices {
                      if let Some(ap) = device.active_ap {
                          found_conn = true;
-                         println!("{}│{}  {}: {}", BLUE, NC, device.interface, ap.ssid);
+                         
+                         // Calculate band steering score
+                         let score = ap.score(10, 15); // Default biases: +10 for 5GHz, +15 for 6GHz
+                         
+                         // Determine channel from frequency
+                         let channel = freq_to_channel(ap.frequency);
+                         
+                         // Signal quality description
+                         let signal_quality = match ap.signal_strength {
+                             s if s >= -50 => format!("{}Excellent{}", GREEN, NC),
+                             s if s >= -60 => format!("{}Good{}", GREEN, NC),
+                             s if s >= -70 => format!("{}Fair{}", YELLOW, NC),
+                             _ => format!("{}Poor{}", RED, NC),
+                         };
+                         
+                         println!("{}│{}  {}{}{}: {}", BLUE, NC, BOLD, device.interface, NC, ap.ssid);
                          println!("{}│{}    ├─ BSSID:    {}", BLUE, NC, ap.bssid);
-                         println!("{}│{}    ├─ Band:     {:?} ({} MHz)", BLUE, NC, ap.band, ap.frequency);
-                         println!("{}│{}    ├─ Signal:   {} dBm", BLUE, NC, ap.signal_strength);
-                         println!("{}│{}    └─ Link:     {} Mbit/s", BLUE, NC, device.bitrate / 1000);
+                         println!("{}│{}    ├─ Band:     {:?} (Ch {} @ {} MHz)", BLUE, NC, ap.band, channel, ap.frequency);
+                         println!("{}│{}    ├─ Signal:   {} dBm ({})", BLUE, NC, ap.signal_strength, signal_quality);
+                         println!("{}│{}    ├─ Link:     {} Mbit/s", BLUE, NC, device.bitrate / 1000);
+                         println!("{}│{}    └─ Score:    {} (for band steering)", BLUE, NC, score);
                      }
                  }
                  if !found_conn {
-                     println!("{}│{}  No active connection found", BLUE, NC);
+                     // Check for ethernet connection instead
+                     let eth_conn = Command::new("nmcli")
+                         .args(["-t", "-f", "NAME,DEVICE,TYPE,STATE", "connection", "show", "--active"])
+                         .output()
+                         .ok()
+                         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                         .unwrap_or_default();
+                     
+                     let mut eth_found = false;
+                     for line in eth_conn.lines() {
+                         let parts: Vec<&str> = line.split(':').collect();
+                         if parts.len() >= 4 && parts[2] == "802-3-ethernet" && parts[3] == "activated" {
+                             eth_found = true;
+                             let conn_name = parts[0];
+                             let iface = parts[1];
+                             
+                             // Get ethernet speed
+                             let speed = Command::new("ethtool")
+                                 .arg(iface)
+                                 .output()
+                                 .ok()
+                                 .and_then(|o| {
+                                     let stdout = String::from_utf8_lossy(&o.stdout);
+                                     stdout.lines()
+                                         .find(|l| l.contains("Speed:"))
+                                         .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+                                 })
+                                 .unwrap_or_else(|| "Unknown".to_string());
+                             
+                             println!("{}│{}  {}{}{}: {} (Ethernet)", BLUE, NC, BOLD, iface, NC, conn_name);
+                             println!("{}│{}    ├─ Type:     Wired Ethernet", BLUE, NC);
+                             println!("{}│{}    ├─ Speed:    {}", BLUE, NC, speed);
+                             println!("{}│{}    └─ Latency:  {}Ultra-low{} (wired)", BLUE, NC, GREEN, NC);
+                         }
+                     }
+                     
+                     if !eth_found {
+                         println!("{}│{}  No active connection found", BLUE, NC);
+                     }
                  }
             }
             Err(_) => println!("{}│{}  Error querying NetworkManager", BLUE, NC),
