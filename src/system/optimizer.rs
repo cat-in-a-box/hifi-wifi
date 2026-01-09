@@ -129,34 +129,57 @@ impl SystemOptimizer {
     }
 
     /// Apply driver-specific module parameters
+    /// 
+    /// References:
+    /// - RTW89: https://github.com/lwfinger/rtw89 (disable_aspm_l1, disable_aspm_l1ss for HP/Lenovo)
+    /// - MT7921: https://wiki.archlinux.org/title/Network_configuration/Wireless#mt7921_/_mt7922
+    /// - iwlwifi: https://wiki.archlinux.org/title/Power_management#Intel_wireless_cards_(iwlwifi)
+    /// - ath11k: Steam Deck OLED WCN6855 - limited params, kernel handles most
     fn apply_driver_config(&self, category: &DriverCategory) -> Result<()> {
         let (filename, config) = match category {
-            DriverCategory::Rtw89 => ("rtw89.conf", r#"# Realtek RTW89 optimizations (RTL8852/RTL8852BE)
-options rtw89_pci disable_aspm=1 disable_clkreq=1
-options rtw89_core tx_ampdu_subframes=32
-options rtw89_8852be disable_ps_mode=1
+            DriverCategory::Rtw89 => ("rtw89.conf", r#"# Realtek RTW89 optimizations (RTL8851BE/RTL8852AE/RTL8852BE/RTL8852CE)
+# Disables PCIe Active State Power Management for stability
+# Required for HP/Lenovo laptops with buggy BIOS PCIe implementations
+options rtw89_pci disable_aspm_l1=y disable_aspm_l1ss=y
+# Disable firmware-level power save for consistent low latency
+options rtw89_core disable_ps_mode=y
 "#),
-            DriverCategory::Rtw88 => ("rtw88.conf", r#"# Realtek RTW88 optimizations (RTL8822CE)
+            DriverCategory::Rtw88 => ("rtw88.conf", r#"# Realtek RTW88 optimizations (RTL8822CE - Steam Deck LCD)
+# Disables PCIe ASPM for stability and lower latency
 options rtw88_pci disable_aspm=1
+# Disables deep low-power states that cause reconnection issues
 options rtw88_core disable_lps_deep=Y
 "#),
-            DriverCategory::RtlLegacy => ("rtl_legacy.conf", r#"# Legacy Realtek optimizations
+            DriverCategory::RtlLegacy => ("rtl_legacy.conf", r#"# Legacy Realtek optimizations (RTL8192EE/RTL8188EE)
+# swenc=1: Software encryption (more stable on some chips)
+# ips=0: Disable inactive power save
+# fwlps=0: Disable firmware low-power state
 options rtl8192ee swenc=1 ips=0 fwlps=0
 options rtl8188ee swenc=1 ips=0 fwlps=0
 options rtl_pci disable_aspm=1
 "#),
-            DriverCategory::MediaTek => ("mediatek.conf", r#"# MediaTek optimizations (MT7921/MT76)
+            DriverCategory::MediaTek => ("mediatek.conf", r#"# MediaTek optimizations (MT7921/MT7922/MT76)
+# Fixes high latency issues documented in Arch Wiki
 options mt7921e disable_aspm=1
+# Disable USB scatter-gather for better stability on USB adapters
 options mt76_usb disable_usb_sg=1
 "#),
-            DriverCategory::Intel => ("iwlwifi.conf", r#"# Intel Wi-Fi optimizations
-options iwlwifi power_save=0 uapsd_disable=1 11n_disable=0
+            DriverCategory::Intel => ("iwlwifi.conf", r#"# Intel Wi-Fi optimizations (AX200/AX201/AX210/AX211/BE200)
+# power_save=0: Disable driver-level power saving
+# uapsd_disable=1: Disable U-APSD (unscheduled automatic power save delivery)
+#   - U-APSD can cause latency spikes during gaming
+options iwlwifi power_save=0 uapsd_disable=1
+# power_scheme=1: "Always Active" mode (vs 2=Balanced, 3=Low-power)
+# Prevents WiFi card disappearing on battery or after suspend
 options iwlmvm power_scheme=1
 "#),
             DriverCategory::Atheros => ("ath_wifi.conf", r#"# Qualcomm Atheros optimizations
-options ath10k_core skip_otp=y
+# ath11k: Steam Deck OLED (WCN6855) and other WiFi 6E chips
+# disable_aspm=1: Prevents latency spikes from PCIe power transitions
 options ath11k_pci disable_aspm=1
-options ath9k nohwcrypt=0 ps_enable=0
+# ath9k: Legacy 802.11n chips (AR9285/AR9287/etc)
+# ps_enable=0: Disable hardware power save
+options ath9k ps_enable=0
 "#),
             DriverCategory::Broadcom => ("broadcom.conf", r#"# Broadcom optimizations
 options brcmfmac roamoff=1
