@@ -198,11 +198,18 @@ impl Governor {
                 let iw_bitrate = Self::get_bitrate_from_iw(&interface).unwrap_or(0);
                 
                 // Average both sources if both valid, otherwise use whichever is valid
-                // Reject readings below 54Mbit (MCS0 probe frames are garbage)
-                let min_valid_kbit = 54_000;  // 54 Mbit minimum (802.11g)
+                // Reject readings below 20Mbit (lowered for Steam Deck compatibility)
+                // WiFi 4 HT20 MCS7 = 65Mbit, but some devices report lower during idle
+                let min_valid_kbit = 20_000;  // 20 Mbit minimum
                 
                 let nm_valid = nm_bitrate >= min_valid_kbit;
                 let iw_valid = iw_bitrate >= min_valid_kbit;
+                
+                // Debug logging on first tick or when both invalid
+                if !nm_valid && !iw_valid {
+                    debug!("CAKE bitrate check on {}: NM={} Kbit (valid:{}), iw={} Kbit (valid:{})",
+                           interface, nm_bitrate, nm_valid, iw_bitrate, iw_valid);
+                }
                 
                 let effective_bitrate = match (nm_valid, iw_valid) {
                     (true, true) => (nm_bitrate + iw_bitrate) / 2,  // Average both
@@ -244,13 +251,21 @@ impl Governor {
                         }
                         state.bandwidth_valid = true;
                     } else {
-                        // No current OR historical valid bitrate - disable CAKE
-                        if state.bandwidth_valid {
-                            warn!("CAKE: No valid bitrate (NM={}, iw={}) and no last known good, disabling CAKE on {}",
-                                  nm_bitrate, iw_bitrate, interface);
-                            let _ = state.tc_manager.remove_cake(&interface);
-                            state.bandwidth_valid = false;
+                        // No current OR historical valid bitrate
+                        // Use a conservative default of 100Mbit (safe for most WiFi 5/6 networks)
+                        // This ensures CAKE is enabled even when bitrate detection fails
+                        let default_mbit = 100;
+                        let scaled_mbit = (default_mbit as f64 * self.config.cake_overhead_factor) as u32;
+                        
+                        if !state.bandwidth_valid {
+                            info!("CAKE: No bitrate detected (NM={}, iw={}), using conservative default {}Mbit on {}",
+                                  nm_bitrate, iw_bitrate, default_mbit, interface);
                         }
+                        
+                        if state.tc_manager.update_bandwidth(scaled_mbit) {
+                            let _ = state.tc_manager.apply_cake(&interface);
+                        }
+                        state.bandwidth_valid = true;
                     }
                 }
             }
@@ -518,17 +533,57 @@ impl Governor {
         
         let stdout = String::from_utf8_lossy(&output.stdout);
         
-        // Parse "tx bitrate: 866.7 MBit/s" or similar
+        // Parse bitrate from iw output - multiple formats supported:
+        // "tx bitrate: 866.7 MBit/s ..."
+        // "	tx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2"
+        // Steam Deck ath11k may report: "tx bitrate: 1201.0 MBit/s 80MHz HE-MCS 11 HE-NSS 2 HE-GI 0 HE-DCM 0"
         for line in stdout.lines() {
-            if line.contains("tx bitrate:") {
-                // Extract the number
+            let line_lower = line.to_lowercase();
+            if line_lower.contains("tx bitrate:") || line_lower.contains("bitrate:") {
+                // Extract the number - look for pattern like "866.7 MBit/s" or "1201.0 Mbit/s"
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 for (i, part) in parts.iter().enumerate() {
-                    if *part == "bitrate:" && i + 1 < parts.len() {
-                        if let Ok(mbit) = parts[i + 1].parse::<f64>() {
-                            // Convert to Kbit for consistency with NM
-                            debug!("iw fallback: {}Mbit on {}", mbit, interface);
+                    // Look for "bitrate:" followed by a number
+                    if part.to_lowercase().contains("bitrate:") {
+                        // Next part should be the number
+                        if i + 1 < parts.len() {
+                            if let Ok(mbit) = parts[i + 1].parse::<f64>() {
+                                // Convert to Kbit for consistency with NM
+                                debug!("iw fallback: {}Mbit on {}", mbit, interface);
+                                return Some((mbit * 1000.0) as u32);
+                            }
+                        }
+                    }
+                    // Also try matching "NNN.N" followed by "MBit" in case format varies
+                    if i + 1 < parts.len() && parts[i + 1].to_lowercase().contains("mbit") {
+                        if let Ok(mbit) = part.parse::<f64>() {
+                            debug!("iw fallback (alt format): {}Mbit on {}", mbit, interface);
                             return Some((mbit * 1000.0) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Final fallback: try to get signal from iw station dump
+        // Some drivers (ath11k) may report better data this way
+        let station_output = Command::new("iw")
+            .args(["dev", interface, "station", "dump"])
+            .output()
+            .ok()?;
+        
+        if station_output.status.success() {
+            let station_out = String::from_utf8_lossy(&station_output.stdout);
+            for line in station_out.lines() {
+                let line_lower = line.to_lowercase();
+                if line_lower.contains("tx bitrate:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    for (i, part) in parts.iter().enumerate() {
+                        if part.to_lowercase().contains("bitrate:") && i + 1 < parts.len() {
+                            if let Ok(mbit) = parts[i + 1].parse::<f64>() {
+                                debug!("iw station dump fallback: {}Mbit on {}", mbit, interface);
+                                return Some((mbit * 1000.0) as u32);
+                            }
                         }
                     }
                 }

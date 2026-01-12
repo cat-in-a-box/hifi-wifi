@@ -546,12 +546,14 @@ async fn run_status_async() -> Result<()> {
         } else {
             // Special mappings for drivers that report different names in /proc/interrupts
             // - rtl8192ee reports as "rtl_pci"
-            // - ath11k uses MSI-X with multiple IRQ vectors
+            // - rtw88_8822ce (Steam Deck LCD) may show as rtw88, rtw_pci, or interface name
+            // - ath11k uses MSI-X with multiple IRQ vectors (ath11k_pci:base, DP, CE0-CE11, MHI)
             // - Steam Deck OLED (WCN6855) may show as wcn, ath11k, MHI, or other variants
             let search_terms: Vec<&str> = match ifc.driver.as_str() {
                 "rtl8192ee" => vec!["rtl_pci"],
-                "ath11k_pci" | "ath11k" => vec!["ath11k", "wcn", "wlan0", "MHI"],
-                _ => vec![ifc.driver.as_str()],
+                "rtw88_8822ce" | "rtw88_pci" | "rtw_pci" => vec!["rtw88", "rtw_pci", &ifc.name],
+                "ath11k_pci" | "ath11k" => vec!["ath11k", "wcn", "MHI", &ifc.name],
+                _ => vec![ifc.driver.as_str(), &ifc.name],
             };
 
             // Find ALL matching IRQs
