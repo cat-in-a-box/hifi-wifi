@@ -89,6 +89,37 @@ setup_homebrew() {
     echo -e "${GREEN}Homebrew installed successfully${NC}"
 }
 
+# Find Homebrew's GCC binary (installed as gcc-VERSION, e.g., gcc-15)
+find_homebrew_gcc() {
+    local HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+    local gcc_cellar="$HOMEBREW_PREFIX/Cellar/gcc"
+    
+    if [[ ! -d "$gcc_cellar" ]]; then
+        return 1
+    fi
+    
+    # Get the installed version directory (e.g., 15.2.0)
+    local version_dir
+    version_dir=$(ls -1 "$gcc_cellar" 2>/dev/null | head -1)
+    if [[ -z "$version_dir" ]]; then
+        return 1
+    fi
+    
+    # Extract major version (15.2.0 -> 15)
+    local major_version="${version_dir%%.*}"
+    
+    # The actual binaries are gcc-MAJOR and g++-MAJOR
+    local gcc_bin="$HOMEBREW_PREFIX/bin/gcc-$major_version"
+    local gxx_bin="$HOMEBREW_PREFIX/bin/g++-$major_version"
+    
+    if [[ -x "$gcc_bin" ]] && [[ -x "$gxx_bin" ]]; then
+        echo "$gcc_bin:$gxx_bin"
+        return 0
+    fi
+    
+    return 1
+}
+
 # Install build dependencies via Homebrew
 setup_homebrew_build_deps() {
     echo -e "${BLUE}Installing build dependencies via Homebrew...${NC}"
@@ -97,20 +128,25 @@ setup_homebrew_build_deps() {
     eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
     
     # Install gcc (includes everything needed for Rust compilation)
-    # Note: brew install may return non-zero for post-install warnings, so we verify gcc works
+    # Note: brew install may return non-zero for post-install warnings
     if [[ $EUID -eq 0 ]] && [[ -n "$SUDO_USER" ]]; then
         sudo -u "$SUDO_USER" "$HOMEBREW_PREFIX/bin/brew" install gcc || true
     else
         brew install gcc || true
     fi
     
-    # Verify GCC actually works (more reliable than exit code)
-    if [[ -x "$HOMEBREW_PREFIX/bin/gcc" ]] && "$HOMEBREW_PREFIX/bin/gcc" --version &>/dev/null; then
-        echo -e "${GREEN}Build dependencies ready!${NC}"
-    else
-        echo -e "${RED}Failed to install gcc via Homebrew${NC}"
-        return 1
+    # Verify GCC actually works by finding the versioned binary
+    local gcc_paths
+    if gcc_paths=$(find_homebrew_gcc); then
+        local gcc_bin="${gcc_paths%%:*}"
+        if "$gcc_bin" --version &>/dev/null; then
+            echo -e "${GREEN}Build dependencies ready! ($(basename "$gcc_bin"))${NC}"
+            return 0
+        fi
     fi
+    
+    echo -e "${RED}Failed to install gcc via Homebrew${NC}"
+    return 1
 }
 
 # Setup SteamOS build environment using Homebrew (persists across updates!)
@@ -131,12 +167,17 @@ setup_steamos_build_env() {
         exit 1
     }
     
-    # Export Homebrew environment for the build
-    export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-    export CC="/home/linuxbrew/.linuxbrew/bin/gcc"
-    export CXX="/home/linuxbrew/.linuxbrew/bin/g++"
+    # Find and export the versioned GCC binaries
+    local gcc_paths
+    gcc_paths=$(find_homebrew_gcc)
+    local gcc_bin="${gcc_paths%%:*}"
+    local gxx_bin="${gcc_paths##*:}"
     
-    echo -e "${GREEN}Build environment ready!${NC}\n"
+    export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+    export CC="$gcc_bin"
+    export CXX="$gxx_bin"
+    
+    echo -e "${GREEN}Build environment ready! (CC=$CC)${NC}\n"
 }
 
 # Check for Rust toolchain, install if missing
