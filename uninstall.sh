@@ -16,40 +16,13 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Source os-release to detect distro
-IS_STEAMOS=false
-if [ -f /etc/os-release ]; then
-    source /etc/os-release
-    if [[ "$ID" == "steamos" ]]; then
-        IS_STEAMOS=true
-    fi
-fi
-
-# SteamOS: Handle read-only filesystem for /usr/local/bin
-if [[ "$IS_STEAMOS" == true ]]; then
-    echo -e "${BLUE}[SteamOS] Preparing filesystem for uninstall...${NC}"
-    
-    # Unmerge system extensions
-    systemd-sysext unmerge 2>/dev/null || true
-    sleep 1
-    
-    # Disable readonly
-    steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-    sleep 1
-    
-    # Verify we can write
-    if ! touch /usr/local/bin/.test-write 2>/dev/null; then
-        echo -e "${YELLOW}Filesystem still read-only, attempting aggressive unmerge...${NC}"
-        systemd-sysext unmerge 2>/dev/null || true
-        sleep 2
-        steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-        sleep 1
-    fi
-    rm -f /usr/local/bin/.test-write 2>/dev/null
-fi
+# Detect user
+SUDO_USER="${SUDO_USER:-deck}"
+USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+USER_HOME="${USER_HOME:-/home/$SUDO_USER}"
 
 # 1. Stop and disable service
-echo -e "${BLUE}[1/4] Stopping service...${NC}"
+echo -e "${BLUE}[1/5] Stopping service...${NC}"
 if systemctl is-active --quiet hifi-wifi 2>/dev/null; then
     systemctl stop hifi-wifi
     echo "Service stopped."
@@ -74,9 +47,6 @@ fi
 
 # 3. Remove user repair service (SteamOS auto-repair)
 echo -e "${BLUE}[3/5] Removing user repair service...${NC}"
-SUDO_USER="${SUDO_USER:-deck}"
-USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-USER_HOME="${USER_HOME:-/home/$SUDO_USER}"
 
 # Disable and stop user service
 sudo -u "$SUDO_USER" systemctl --user disable hifi-wifi-repair.service 2>/dev/null || true
@@ -108,16 +78,17 @@ if [[ -d /var/lib/hifi-wifi ]]; then
     echo "Removed /var/lib/hifi-wifi"
 fi
 
-# Remove symlink
-if [[ -L /usr/local/bin/hifi-wifi ]]; then
-    rm -f /usr/local/bin/hifi-wifi
-    echo "Removed /usr/local/bin/hifi-wifi symlink"
-fi
-
-# Remove repair script (stored with binary)
-if [[ -f /var/lib/hifi-wifi/repair.sh ]]; then
-    rm -f /var/lib/hifi-wifi/repair.sh
-    echo "Removed repair script"
+# Remove PATH from .bashrc
+BASHRC="$USER_HOME/.bashrc"
+if grep -qF '/var/lib/hifi-wifi' "$BASHRC" 2>/dev/null; then
+    # Create backup
+    cp "$BASHRC" "$BASHRC.bak"
+    # Remove the hifi-wifi lines
+    grep -vF '/var/lib/hifi-wifi' "$BASHRC.bak" | grep -v '# hifi-wifi CLI access' > "$BASHRC"
+    # Fix ownership
+    chown "$SUDO_USER:$SUDO_USER" "$BASHRC"
+    rm -f "$BASHRC.bak"
+    echo "Removed PATH entry from .bashrc"
 fi
 
 # 5. Remove config (optional - ask user)
@@ -163,10 +134,4 @@ done
 
 echo ""
 echo -e "${GREEN}hifi-wifi has been completely uninstalled.${NC}"
-
-# SteamOS: Re-enable read-only filesystem
-if [[ "$IS_STEAMOS" == true ]]; then
-    echo -e "${BLUE}[SteamOS] Re-enabling read-only filesystem...${NC}"
-    steamos-readonly enable 2>&1 | grep -v "Warning:" || true
-    echo -e "${GREEN}Filesystem protection restored.${NC}"
-fi
+echo -e "${YELLOW}Note: Open a new terminal for PATH changes to take effect.${NC}"

@@ -60,13 +60,6 @@ async fn main() -> Result<()> {
         log::set_max_level(log::LevelFilter::Warn);
     }
 
-    // Self-repair: If CLI symlink is missing (SteamOS update wiped it), restore it
-    // This runs on EVERY invocation - makes hifi-wifi self-healing
-    // Must run before root check since status doesn't need root but repair does
-    if utils::privilege::is_root() {
-        quick_self_repair();
-    }
-
     // Root check (except for status command)
     if !matches!(cli.command, Some(Commands::Status)) && !utils::privilege::is_root() {
         error!("This application must be run as root.");
@@ -305,173 +298,9 @@ fn is_steamos() -> bool {
     }
 }
 
-/// Quick self-repair: Restore CLI symlink and systemd service if missing
-/// This runs on EVERY root invocation to make hifi-wifi self-healing after SteamOS updates
-/// SteamOS wipes /etc and /usr on updates, but /var persists - so we repair from there
-fn quick_self_repair() {
-    use std::os::unix::fs::symlink;
-    use std::path::Path;
-    use std::process::Command;
-    
-    let binary_path = Path::new("/var/lib/hifi-wifi/hifi-wifi");
-    let symlink_path = Path::new("/usr/local/bin/hifi-wifi");
-    let service_path = Path::new("/etc/systemd/system/hifi-wifi.service");
-    
-    // Only repair if our binary exists in persistent storage
-    if !binary_path.exists() {
-        return;
-    }
-    
-    let mut needs_repair = false;
-    
-    // Check if CLI symlink is missing
-    if !symlink_path.exists() {
-        needs_repair = true;
-    }
-    
-    // Check if service file is missing
-    if !service_path.exists() {
-        needs_repair = true;
-    }
-    
-    if !needs_repair {
-        return;
-    }
-    
-    // On SteamOS, disable read-only filesystem for repairs
-    let steamos = is_steamos();
-    if steamos {
-        let _ = Command::new("systemd-sysext").arg("unmerge").output();
-        let _ = Command::new("steamos-readonly").arg("disable").output();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    }
-    
-    // Repair CLI symlink
-    if !symlink_path.exists() {
-        eprintln!("[hifi-wifi] Self-repair: Restoring CLI symlink...");
-        let _ = std::fs::remove_file(symlink_path); // Remove broken symlink if any
-        if symlink(binary_path, symlink_path).is_ok() {
-            eprintln!("[hifi-wifi] CLI symlink restored: {} -> {}", symlink_path.display(), binary_path.display());
-        }
-    }
-    
-    // Repair systemd service file
-    if !service_path.exists() {
-        eprintln!("[hifi-wifi] Self-repair: Restoring systemd service...");
-        let service_content = r#"[Unit]
-Description=hifi-wifi Network Optimizer
-Documentation=https://github.com/doughty247/hifi-wifi
-After=network-online.target NetworkManager.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/var/lib/hifi-wifi/hifi-wifi monitor
-Restart=on-failure
-RestartSec=5
-
-# Security hardening
-ProtectSystem=full
-ProtectHome=true
-NoNewPrivileges=false
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
-
-# Resource limits
-MemoryMax=64M
-CPUQuota=10%
-
-[Install]
-WantedBy=multi-user.target
-"#;
-        if let Ok(mut file) = std::fs::File::create(service_path) {
-            use std::io::Write;
-            if file.write_all(service_content.as_bytes()).is_ok() {
-                eprintln!("[hifi-wifi] Systemd service restored");
-                // Reload and enable
-                let _ = Command::new("systemctl").args(["daemon-reload"]).output();
-                let _ = Command::new("systemctl").args(["enable", "hifi-wifi.service"]).output();
-                let _ = Command::new("systemctl").args(["start", "hifi-wifi.service"]).output();
-            }
-        }
-    }
-    
-    // Re-enable read-only on SteamOS
-    if steamos {
-        let _ = Command::new("steamos-readonly").arg("enable").output();
-    }
-}
-
-/// Self-healing routine to ensure the binary is accessible via CLI
-/// On SteamOS, this handles read-only filesystem after system updates
-fn ensure_symlinks() {
-    use std::os::unix::fs::symlink;
-    use std::path::Path;
-    use std::process::Command;
-    use log::{info, warn, debug};
-
-    let target = "/var/lib/hifi-wifi/hifi-wifi";
-    // Prefer /usr/local/bin as it's often writable/overlayed on Bazzite/Silverblue
-    let link_path = "/usr/local/bin/hifi-wifi";
-
-    if !Path::new(target).exists() {
-        warn!("Source binary not found at {}, skipping symlink creation", target);
-        return;
-    }
-
-    // Check if symlink already exists and is correct
-    if Path::new(link_path).exists() {
-        if let Ok(existing_target) = std::fs::read_link(link_path) {
-            if existing_target.to_string_lossy() == target {
-                debug!("Symlink already exists and is correct");
-                return;
-            }
-        }
-        // Symlink exists but points somewhere else - remove it
-        let _ = std::fs::remove_file(link_path);
-    }
-
-    info!("Self-Healing: Creating symlink {} -> {}", link_path, target);
-    
-    // On SteamOS, we need to disable read-only filesystem first
-    let steamos = is_steamos();
-    if steamos {
-        debug!("SteamOS detected, disabling read-only filesystem for symlink");
-        // Unmerge system extensions first
-        let _ = Command::new("systemd-sysext")
-            .arg("unmerge")
-            .output();
-        
-        // Disable read-only
-        let _ = Command::new("steamos-readonly")
-            .arg("disable")
-            .output();
-        
-        // Small delay for filesystem to settle
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    // Try to create symlink
-    if let Err(e) = symlink(target, link_path) {
-        warn!("Failed to create symlink at {}: {}", link_path, e);
-    } else {
-        info!("Symlink created successfully.");
-    }
-
-    // Re-enable read-only on SteamOS
-    if steamos {
-        debug!("Re-enabling SteamOS read-only filesystem");
-        let _ = Command::new("steamos-readonly")
-            .arg("enable")
-            .output();
-    }
-}
-
 /// Run the Governor in monitor mode (daemon)
 async fn run_monitor(config: &config::structs::Config) -> Result<()> {
     info!("=== hifi-wifi v3.0 Monitor Mode ===");
-    // Crucial for immutable distros (Bazzite/Silverblue) where /usr/bin is read-only
-    ensure_symlinks();
 
     info!("Starting continuous optimization daemon...\n");
 
@@ -912,18 +741,6 @@ WantedBy=multi-user.target
     let mut file = File::create(service_path)?;
     file.write_all(service_content.as_bytes())?;
 
-    // Create systemd preset to survive SteamOS updates
-    let preset_dir = std::path::Path::new("/etc/systemd/system-preset");
-    if let Err(e) = fs::create_dir_all(preset_dir) {
-        warn!("Could not create preset directory: {}", e);
-    } else {
-        let preset_path = preset_dir.join("99-hifi-wifi.preset");
-        if let Ok(mut preset_file) = File::create(&preset_path) {
-            let _ = preset_file.write_all(b"enable hifi-wifi.service\n");
-            info!("Created systemd preset for automatic enable");
-        }
-    }
-
     // Reload systemd and enable service
     info!("Enabling service...");
     Command::new("systemctl").args(["daemon-reload"]).output()?;
@@ -935,14 +752,8 @@ WantedBy=multi-user.target
     info!("  Status: systemctl status hifi-wifi");
     info!("  Logs:   journalctl -u hifi-wifi -f");
     
-    // Create CLI symlink for user convenience
-    ensure_symlinks();
-    
-    // Install tmpfiles.d config for SteamOS persistence (recreates symlinks on every boot)
-    install_tmpfiles_config()?;
-    
-    // Install bootstrap timer as backup
-    install_bootstrap_timer()?;
+    // Setup CLI access via PATH in .bashrc (persists across SteamOS updates!)
+    setup_user_path()?;
     
     // Install user-level auto-repair service for SteamOS (survives updates in ~/.config/)
     if is_steamos() {
@@ -952,120 +763,65 @@ WantedBy=multi-user.target
     Ok(())
 }
 
-/// Install tmpfiles.d config that recreates symlinks on every boot
-/// This is the PRIMARY persistence mechanism for SteamOS - it survives updates!
-fn install_tmpfiles_config() -> Result<()> {
-    use std::fs::{self, File};
-    use std::io::Write;
+/// Add /var/lib/hifi-wifi to user's PATH via .bashrc
+/// This is the PERSISTENT way to provide CLI access on immutable distros like SteamOS
+/// ~/.bashrc lives in /home which is NEVER touched by SteamOS updates
+fn setup_user_path() -> Result<()> {
+    use std::fs::{self, OpenOptions};
+    use std::io::{BufRead, BufReader, Write};
     use std::process::Command;
     
-    // tmpfiles.d in /etc is persistent on SteamOS!
-    let tmpfiles_dir = std::path::Path::new("/etc/tmpfiles.d");
-    let tmpfiles_path = tmpfiles_dir.join("hifi-wifi.conf");
+    let sudo_user = std::env::var("SUDO_USER").unwrap_or_else(|_| "deck".to_string());
+    let home = Command::new("getent")
+        .args(["passwd", &sudo_user])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split(':')
+                .nth(5)
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| format!("/home/{}", sudo_user));
     
-    info!("Installing tmpfiles.d config for boot-time symlink restoration...");
+    let bashrc_path = format!("{}/.bashrc", home);
+    let path_line = r#"export PATH="$PATH:/var/lib/hifi-wifi""#;
     
-    // Create directory if needed
-    fs::create_dir_all(tmpfiles_dir)?;
+    info!("Setting up CLI access via PATH in {}", bashrc_path);
     
-    // tmpfiles.d format: Type Path Mode User Group Age Argument
-    // L+ = create symlink, replace if exists
-    let tmpfiles_content = r#"# hifi-wifi - recreate symlinks on every boot (survives SteamOS updates)
-# CLI symlink
-L+ /usr/local/bin/hifi-wifi - - - - /var/lib/hifi-wifi/hifi-wifi
-# Systemd service symlinks (bootstrap timer restores the actual service)
-L+ /etc/systemd/system/hifi-wifi-bootstrap.service - - - - /var/lib/hifi-wifi/hifi-wifi-bootstrap.service
-L+ /etc/systemd/system/hifi-wifi-bootstrap.timer - - - - /var/lib/hifi-wifi/hifi-wifi-bootstrap.timer
-"#;
-
-    let mut file = File::create(&tmpfiles_path)?;
-    file.write_all(tmpfiles_content.as_bytes())?;
+    // Check if already present
+    if let Ok(file) = fs::File::open(&bashrc_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if line.contains("/var/lib/hifi-wifi") {
+                    info!("PATH already configured in .bashrc");
+                    return Ok(());
+                }
+            }
+        }
+    }
     
-    info!("Created {}", tmpfiles_path.display());
-    info!("Symlinks will be automatically restored on every boot!");
+    // Append to bashrc
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&bashrc_path)?;
     
-    // Run tmpfiles now to apply immediately
-    let _ = Command::new("systemd-tmpfiles")
-        .args(["--create", tmpfiles_path.to_str().unwrap_or("hifi-wifi.conf")])
-        .output();
+    writeln!(file)?;
+    writeln!(file, "# hifi-wifi CLI access (survives SteamOS updates)")?;
+    writeln!(file, "{}", path_line)?;
     
-    Ok(())
-}
-
-/// Install user-level systemd timer that persists across SteamOS updates
-/// This timer runs bootstrap on every login to repair the system service if wiped
-fn install_bootstrap_timer() -> Result<()> {
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::process::Command;
+    // Fix ownership
+    let uid_output = Command::new("id").args(["-u", &sudo_user]).output()?;
+    let gid_output = Command::new("id").args(["-g", &sudo_user]).output()?;
+    let uid: u32 = String::from_utf8_lossy(&uid_output.stdout).trim().parse().unwrap_or(1000);
+    let gid: u32 = String::from_utf8_lossy(&gid_output.stdout).trim().parse().unwrap_or(1000);
     
-    // Store actual service files in persistent location
-    let persistent_dir = std::path::Path::new("/var/lib/hifi-wifi");
-    let system_dir = std::path::Path::new("/etc/systemd/system");
+    let _ = std::os::unix::fs::chown(&bashrc_path, Some(uid), Some(gid));
     
-    info!("Installing persistent bootstrap service in {}", persistent_dir.display());
-    
-    // Create bootstrap service that repairs the main service
-    let bootstrap_service = r#"[Unit]
-Description=hifi-wifi Bootstrap (repairs main service after SteamOS updates)
-After=local-fs.target
-Before=network-online.target
-ConditionPathExists=/var/lib/hifi-wifi/hifi-wifi
-ConditionPathExists=!/etc/systemd/system/hifi-wifi.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/var/lib/hifi-wifi/hifi-wifi bootstrap
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
-    let bootstrap_timer = r#"[Unit]
-Description=hifi-wifi Bootstrap Timer (auto-repairs after SteamOS updates)
-ConditionPathExists=/var/lib/hifi-wifi/hifi-wifi
-
-[Timer]
-# Run 30 seconds after boot to allow filesystem to settle
-OnBootSec=30s
-# Also check periodically
-OnUnitActiveSec=6h
-
-[Install]
-WantedBy=timers.target
-"#;
-
-    // Save to persistent location
-    let persistent_service = persistent_dir.join("hifi-wifi-bootstrap.service");
-    let persistent_timer = persistent_dir.join("hifi-wifi-bootstrap.timer");
-    
-    let mut f = File::create(&persistent_service)?;
-    f.write_all(bootstrap_service.as_bytes())?;
-    
-    let mut f = File::create(&persistent_timer)?;
-    f.write_all(bootstrap_timer.as_bytes())?;
-    
-    // Create symlinks in system directory
-    let system_service = system_dir.join("hifi-wifi-bootstrap.service");
-    let system_timer = system_dir.join("hifi-wifi-bootstrap.timer");
-    
-    // Remove old files/links if they exist
-    let _ = fs::remove_file(&system_service);
-    let _ = fs::remove_file(&system_timer);
-    
-    // Create symlinks
-    std::os::unix::fs::symlink(&persistent_service, &system_service)?;
-    std::os::unix::fs::symlink(&persistent_timer, &system_timer)?;
-    
-    info!("Created symlinks: {} -> {}", system_service.display(), persistent_service.display());
-    
-    // Enable and start the timer
-    Command::new("systemctl").args(["daemon-reload"]).output()?;
-    Command::new("systemctl").args(["enable", "hifi-wifi-bootstrap.timer"]).output()?;
-    Command::new("systemctl").args(["start", "hifi-wifi-bootstrap.timer"]).output()?;
-    
-    info!("Bootstrap timer installed - will auto-repair after SteamOS updates");
+    info!("Added /var/lib/hifi-wifi to PATH in .bashrc");
+    info!("Run 'source ~/.bashrc' or open a new terminal to use 'hifi-wifi' command");
     
     Ok(())
 }
@@ -1101,17 +857,18 @@ fn install_user_repair_service() -> Result<()> {
     fs::create_dir_all(&user_systemd_dir)?;
     
     // Create a repair script that handles the sudo/polkit interaction
-    // This script only does work if repair is actually needed
+    // This script only does work if repair is actually needed (systemd service missing)
+    // NOTE: CLI access is now via PATH in .bashrc - no symlinks to repair!
     let repair_script = r#"#!/bin/bash
 # hifi-wifi auto-repair script - runs at user login on SteamOS
-# Only performs repair if needed (symlink missing but binary exists)
+# Only performs repair if needed (systemd service missing but binary exists)
+# CLI access is via PATH in ~/.bashrc (persistent), no symlinks needed!
 
 BINARY="/var/lib/hifi-wifi/hifi-wifi"
-SYMLINK="/usr/local/bin/hifi-wifi"
 SERVICE="/etc/systemd/system/hifi-wifi.service"
 
-# Exit early if no repair needed
-if [[ -x "$SYMLINK" ]] && [[ -f "$SERVICE" ]]; then
+# Exit early if no repair needed (service exists)
+if [[ -f "$SERVICE" ]]; then
     exit 0
 fi
 
@@ -1120,8 +877,8 @@ if [[ ! -x "$BINARY" ]]; then
     exit 0
 fi
 
-# Repair needed - use pkexec for GUI-friendly privilege escalation
-# pkexec shows a nice authentication dialog if needed
+# Service missing - repair needed
+# Use pkexec for GUI-friendly privilege escalation
 exec pkexec "$BINARY" bootstrap
 "#;
 
@@ -1226,8 +983,6 @@ fn run_uninstall() -> Result<()> {
         "/etc/systemd/system/hifi-wifi-bootstrap.timer",
         "/var/lib/hifi-wifi/hifi-wifi-bootstrap.service",
         "/var/lib/hifi-wifi/hifi-wifi-bootstrap.timer",
-        "/usr/local/bin/hifi-wifi",
-        "/etc/tmpfiles.d/hifi-wifi.conf",
     ];
     
     for path in &files_to_remove {
@@ -1247,8 +1002,8 @@ fn run_uninstall() -> Result<()> {
         let _ = fs::remove_file(binary_path);
     }
 
-    // Remove bashrc hook if present
-    remove_bashrc_hook();
+    // Remove PATH from .bashrc
+    remove_user_path();
     
     // Remove user repair service
     remove_user_repair_service();
@@ -1260,43 +1015,50 @@ fn run_uninstall() -> Result<()> {
     Ok(())
 }
 
-/// Remove the bashrc auto-repair hook
-fn remove_bashrc_hook() {
-    // Get the real user's home directory
-    let home = std::env::var("SUDO_USER")
+/// Remove /var/lib/hifi-wifi from user's PATH in .bashrc
+fn remove_user_path() {
+    use std::io::{BufRead, BufReader, Write};
+    
+    let sudo_user = std::env::var("SUDO_USER").unwrap_or_else(|_| "deck".to_string());
+    let home = std::process::Command::new("getent")
+        .args(["passwd", &sudo_user])
+        .output()
         .ok()
-        .and_then(|user| {
-            std::process::Command::new("getent")
-                .args(["passwd", &user])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .split(':')
-                        .nth(5)
-                        .map(|s| s.to_string())
-                })
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split(':')
+                .nth(5)
+                .map(|s| s.to_string())
         })
-        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/home/deck".to_string()));
+        .unwrap_or_else(|| format!("/home/{}", sudo_user));
     
     let bashrc_path = format!("{}/.bashrc", home);
     
-    if let Ok(contents) = std::fs::read_to_string(&bashrc_path) {
-        // Remove the hook section
-        let hook_start = "# hifi-wifi auto-repair hook";
-        if contents.contains(hook_start) {
-            let new_contents: String = contents
-                .lines()
-                .filter(|line| {
-                    !line.contains("hifi-wifi") || line.contains("alias")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            
+    if let Ok(file) = std::fs::File::open(&bashrc_path) {
+        let reader = BufReader::new(file);
+        let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+        
+        // Filter out hifi-wifi PATH lines
+        let filtered: Vec<&String> = lines.iter()
+            .filter(|line| !line.contains("/var/lib/hifi-wifi") && !line.contains("# hifi-wifi CLI access"))
+            .collect();
+        
+        if filtered.len() != lines.len() {
+            // Write back filtered content
             if let Ok(mut file) = std::fs::File::create(&bashrc_path) {
-                use std::io::Write;
-                let _ = file.write_all(new_contents.as_bytes());
-                info!("Removed bashrc hook");
+                for line in filtered {
+                    let _ = writeln!(file, "{}", line);
+                }
+                info!("Removed PATH entry from .bashrc");
+                
+                // Fix ownership
+                let uid_output = std::process::Command::new("id").args(["-u", &sudo_user]).output();
+                let gid_output = std::process::Command::new("id").args(["-g", &sudo_user]).output();
+                if let (Ok(uid_out), Ok(gid_out)) = (uid_output, gid_output) {
+                    let uid: u32 = String::from_utf8_lossy(&uid_out.stdout).trim().parse().unwrap_or(1000);
+                    let gid: u32 = String::from_utf8_lossy(&gid_out.stdout).trim().parse().unwrap_or(1000);
+                    let _ = std::os::unix::fs::chown(&bashrc_path, Some(uid), Some(gid));
+                }
             }
         }
     }
@@ -1392,7 +1154,8 @@ fn run_on() -> Result<()> {
 }
 
 /// Bootstrap: Check if system service exists and repair if missing
-/// This is called by the system-level timer on boot to survive SteamOS updates
+/// This is called by the user repair service on boot to survive SteamOS updates
+/// NOTE: CLI access is now via PATH in ~/.bashrc - no symlinks to repair!
 fn run_bootstrap() -> Result<()> {
     use std::fs::File;
     use std::io::Write;
@@ -1401,9 +1164,6 @@ fn run_bootstrap() -> Result<()> {
     
     let service_path = Path::new("/etc/systemd/system/hifi-wifi.service");
     let binary_path = Path::new("/var/lib/hifi-wifi/hifi-wifi");
-    let symlink_path = Path::new("/usr/local/bin/hifi-wifi");
-    let persistent_dir = Path::new("/var/lib/hifi-wifi");
-    let system_dir = Path::new("/etc/systemd/system");
     
     // Check if binary exists (if not, nothing we can do)
     if !binary_path.exists() {
@@ -1412,31 +1172,6 @@ fn run_bootstrap() -> Result<()> {
     }
     
     let mut repaired = false;
-    let steamos = is_steamos();
-    
-    // On SteamOS, need to disable read-only first for any repairs
-    if steamos {
-        let _ = Command::new("systemd-sysext").arg("unmerge").output();
-        let _ = Command::new("steamos-readonly").arg("disable").output();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    
-    // Check/repair bootstrap timer symlinks (these get wiped too!)
-    let bootstrap_service_link = system_dir.join("hifi-wifi-bootstrap.service");
-    let bootstrap_timer_link = system_dir.join("hifi-wifi-bootstrap.timer");
-    let persistent_service = persistent_dir.join("hifi-wifi-bootstrap.service");
-    let persistent_timer = persistent_dir.join("hifi-wifi-bootstrap.timer");
-    
-    if persistent_service.exists() && !bootstrap_service_link.exists() {
-        info!("Bootstrap: Restoring bootstrap service symlink...");
-        let _ = std::os::unix::fs::symlink(&persistent_service, &bootstrap_service_link);
-        repaired = true;
-    }
-    if persistent_timer.exists() && !bootstrap_timer_link.exists() {
-        info!("Bootstrap: Restoring bootstrap timer symlink...");
-        let _ = std::os::unix::fs::symlink(&persistent_timer, &bootstrap_timer_link);
-        repaired = true;
-    }
     
     // Check if main service file exists
     if !service_path.exists() {
@@ -1479,24 +1214,11 @@ WantedBy=multi-user.target
         }
     }
     
-    // Check/repair CLI symlink
-    if !symlink_path.exists() {
-        info!("Bootstrap: CLI symlink missing, recreating...");
-        ensure_symlinks();
-        repaired = true;
-    }
-    
-    // Re-enable read-only on SteamOS
-    if steamos {
-        let _ = Command::new("steamos-readonly").arg("enable").output();
-    }
-    
     // If we repaired anything, reload systemd
     if repaired {
         info!("Bootstrap: Reloading systemd and starting services...");
         let _ = Command::new("systemctl").args(["daemon-reload"]).output();
         let _ = Command::new("systemctl").args(["enable", "hifi-wifi.service"]).output();
-        let _ = Command::new("systemctl").args(["enable", "hifi-wifi-bootstrap.timer"]).output();
         let _ = Command::new("systemctl").args(["start", "hifi-wifi.service"]).output();
         info!("Bootstrap: Repair complete - hifi-wifi restored");
     } else {

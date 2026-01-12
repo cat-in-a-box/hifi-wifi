@@ -274,28 +274,32 @@ install_service() {
     echo -e "${GREEN}Service installed${NC}\n"
 }
 
-# Create CLI symlink (handles SteamOS read-only filesystem)
-create_cli_symlink() {
-    local distro_id="${1:-}"
-    local run_as_root=""
-    [[ $EUID -ne 0 ]] && run_as_root="sudo"
+# Add hifi-wifi to user's PATH via .bashrc (survives SteamOS updates!)
+setup_user_path() {
+    local user_home="$REAL_HOME"
+    local bashrc="$user_home/.bashrc"
+    local path_line='export PATH="$PATH:/var/lib/hifi-wifi"'
     
-    if [[ -L /usr/local/bin/hifi-wifi ]]; then
-        return 0  # Already exists
+    echo -e "${BLUE}Setting up CLI access...${NC}"
+    
+    # Check if already in bashrc
+    if grep -qF '/var/lib/hifi-wifi' "$bashrc" 2>/dev/null; then
+        echo -e "${GREEN}PATH already configured in .bashrc${NC}"
+        return 0
     fi
     
-    echo -e "${BLUE}Creating CLI symlink...${NC}"
+    # Add to bashrc
+    echo "" >> "$bashrc"
+    echo "# hifi-wifi CLI access (survives SteamOS updates)" >> "$bashrc"
+    echo "$path_line" >> "$bashrc"
     
-    if [[ "$distro_id" == "steamos" ]]; then
-        # SteamOS: Need to disable read-only temporarily
-        systemd-sysext unmerge 2>/dev/null || true
-        steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-        sleep 1
-        $run_as_root ln -sf /var/lib/hifi-wifi/hifi-wifi /usr/local/bin/hifi-wifi 2>/dev/null || true
-        steamos-readonly enable 2>&1 | grep -v "Warning:" || true
-    else
-        $run_as_root ln -sf /var/lib/hifi-wifi/hifi-wifi /usr/local/bin/hifi-wifi 2>/dev/null || true
+    # Fix ownership if running as root
+    if [[ $EUID -eq 0 ]] && [[ -n "$SUDO_USER" ]]; then
+        chown "$SUDO_USER:$SUDO_USER" "$bashrc"
     fi
+    
+    echo -e "${GREEN}Added /var/lib/hifi-wifi to PATH in .bashrc${NC}"
+    echo -e "${YELLOW}Note: Run 'source ~/.bashrc' or open a new terminal to use 'hifi-wifi' command${NC}"
 }
 
 # Apply initial optimizations
@@ -303,16 +307,8 @@ apply_optimizations() {
     local run_as_root=""
     [[ $EUID -ne 0 ]] && run_as_root="sudo"
     
-    local hifi_cmd
-    if [[ -L /usr/local/bin/hifi-wifi ]]; then
-        hifi_cmd="hifi-wifi"
-    else
-        echo -e "${YELLOW}CLI symlink not in PATH yet. Using absolute path.${NC}"
-        hifi_cmd="/var/lib/hifi-wifi/hifi-wifi"
-    fi
-    
     echo -e "${BLUE}Applying initial optimizations...${NC}"
-    $run_as_root $hifi_cmd apply
+    $run_as_root /var/lib/hifi-wifi/hifi-wifi apply
     echo ""
 }
 
@@ -442,7 +438,7 @@ main() {
     # Step 5: Install
     echo -e "${BLUE}[5/5] Installing service...${NC}"
     install_service
-    create_cli_symlink "$distro_id"
+    setup_user_path
     apply_optimizations
     
     # Offer reboot
