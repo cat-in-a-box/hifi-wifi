@@ -127,11 +127,36 @@ else
             
             echo -e "${BLUE}[SteamOS] Initializing pacman...${NC}"
             if [[ ! -f /etc/pacman.d/gnupg/trustdb.gpg ]]; then
-                pacman-key --init 2>&1 | grep -v "^gpg:"
+                # Run pacman-key --init, capture status before piping
+                # We filter gpg: noise but need to detect real failures
+                set +e  # Temporarily disable exit on error
+                pacman-key --init 2>&1 | grep -v "^gpg:" 
+                INIT_STATUS=${PIPESTATUS[0]}
+                set -e
+                if [[ $INIT_STATUS -ne 0 ]]; then
+                    echo -e "${RED}pacman-key --init failed (exit $INIT_STATUS)${NC}"
+                    exit 1
+                fi
             fi
             
             echo -e "${BLUE}[SteamOS] Populating pacman keys...${NC}"
-            pacman-key --populate archlinux holo 2>&1 | grep -v "^==>" || pacman-key --populate archlinux 2>&1 | grep -v "^==>"
+            # Try archlinux + holo first, fall back to just archlinux
+            # We filter ==> progress lines but need to detect real failures
+            set +e
+            pacman-key --populate archlinux holo 2>&1 | grep -v "^==>"
+            POPULATE_STATUS=${PIPESTATUS[0]}
+            set -e
+            if [[ $POPULATE_STATUS -ne 0 ]]; then
+                echo -e "${YELLOW}holo keyring not found, trying archlinux only...${NC}"
+                set +e
+                pacman-key --populate archlinux 2>&1 | grep -v "^==>"
+                POPULATE_STATUS=${PIPESTATUS[0]}
+                set -e
+                if [[ $POPULATE_STATUS -ne 0 ]]; then
+                    echo -e "${RED}pacman-key --populate failed (exit $POPULATE_STATUS)${NC}"
+                    exit 1
+                fi
+            fi
             
             echo -e "${BLUE}[SteamOS] Syncing package database...${NC}"
             if ! pacman -Sy 2>&1; then
@@ -271,5 +296,26 @@ read -p "Reboot now for full optimization? [Y/n] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
     echo -e "${BLUE}Rebooting...${NC}"
-    $RUN_AS_ROOT reboot
+    
+    # Try systemctl first (works on most distros)
+    if ! $RUN_AS_ROOT systemctl reboot 2>/dev/null; then
+        # If blocked by desktop session inhibitors, try desktop-specific methods
+        # Must run as the logged-in user (not root) to access session DBus
+        if command -v gnome-session-quit &> /dev/null; then
+            # GNOME: Use session manager (handles inhibitors)
+            sudo -u "$REAL_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$REAL_USER")/bus" gnome-session-quit --reboot --no-prompt 2>/dev/null || {
+                echo -e "${YELLOW}Automatic reboot blocked by active session.${NC}"
+                echo -e "${BLUE}Please reboot manually from your desktop.${NC}"
+            }
+        elif command -v qdbus &> /dev/null; then
+            # KDE: Use ksmserver
+            sudo -u "$REAL_USER" qdbus org.kde.Shutdown /Shutdown org.kde.Shutdown.logoutAndReboot 2>/dev/null || {
+                echo -e "${YELLOW}Automatic reboot blocked by active session.${NC}"
+                echo -e "${BLUE}Please reboot manually from your desktop.${NC}"
+            }
+        else
+            echo -e "${YELLOW}Automatic reboot blocked by active session.${NC}"
+            echo -e "${BLUE}Please reboot manually from your desktop.${NC}"
+        fi
+    fi
 fi
