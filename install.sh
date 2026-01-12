@@ -107,8 +107,41 @@ fi
 
 echo -e "${BLUE}=== hifi-wifi v3.0 Installer ===${NC}"
 
-# 1. Rust Detection & Installation
-echo -e "${BLUE}[1/3] Checking Rust toolchain...${NC}"
+# Check for pre-compiled binary (shipped with releases for SteamOS)
+PRECOMPILED_BIN=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Look for pre-compiled binary in order of preference
+if [[ -f "$SCRIPT_DIR/bin/hifi-wifi-x86_64" ]]; then
+    PRECOMPILED_BIN="$SCRIPT_DIR/bin/hifi-wifi-x86_64"
+elif [[ -f "$SCRIPT_DIR/hifi-wifi-x86_64" ]]; then
+    PRECOMPILED_BIN="$SCRIPT_DIR/hifi-wifi-x86_64"
+fi
+
+# Use pre-compiled binary if available (skips entire build toolchain)
+if [[ -n "$PRECOMPILED_BIN" ]]; then
+    echo -e "${GREEN}Pre-compiled binary found: $PRECOMPILED_BIN${NC}"
+    echo -e "${BLUE}Skipping Rust toolchain installation and build phase.${NC}"
+    
+    # Verify binary is executable and correct architecture
+    if ! file "$PRECOMPILED_BIN" | grep -q "x86-64"; then
+        echo -e "${RED}Error: Pre-compiled binary is not x86_64 architecture.${NC}"
+        exit 1
+    fi
+    
+    # Copy to expected location for install phase
+    mkdir -p target/release
+    cp "$PRECOMPILED_BIN" target/release/hifi-wifi
+    chmod +x target/release/hifi-wifi
+    
+    echo -e "${GREEN}[1/2] Using pre-compiled binary${NC}"
+    echo -e "${BLUE}[2/2] Installing system service...${NC}"
+else
+    # No pre-compiled binary - need to build from source
+    echo -e "${BLUE}No pre-compiled binary found. Building from source...${NC}"
+
+    # 1. Rust Detection & Installation
+    echo -e "${BLUE}[1/3] Checking Rust toolchain...${NC}"
 
 # Look for cargo directly in the user's home, not via PATH
 CARGO_BIN="$REAL_HOME/.cargo/bin/cargo"
@@ -159,8 +192,12 @@ if [[ ! -f "target/release/hifi-wifi" ]]; then
     exit 1
 fi
 
-# 3. Install Phase (Needs root)
-echo -e "${BLUE}[3/3] Installing system service...${NC}"
+fi  # End of build-from-source block
+
+# Install Phase (Needs root)
+if [[ -z "$PRECOMPILED_BIN" ]]; then
+    echo -e "${BLUE}[3/3] Installing system service...${NC}"
+fi
 
 RUN_AS_ROOT=""
 if [[ $EUID -ne 0 ]]; then
