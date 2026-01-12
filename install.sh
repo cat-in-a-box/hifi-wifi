@@ -32,7 +32,11 @@ detect_user() {
 # Run command as non-root user with preserved environment
 as_user() {
     if [ "$USER" != "$REAL_USER" ]; then
-        sudo -u "$REAL_USER" HOME="$REAL_HOME" PATH="$REAL_HOME/.cargo/bin:$PATH" "$@"
+        # Build env string with optional CC/CXX for Homebrew builds
+        local env_vars="HOME=$REAL_HOME PATH=$REAL_HOME/.cargo/bin:$PATH"
+        [[ -n "$CC" ]] && env_vars="$env_vars CC=$CC"
+        [[ -n "$CXX" ]] && env_vars="$env_vars CXX=$CXX"
+        sudo -u "$REAL_USER" env $env_vars "$@"
     else
         "$@"
     fi
