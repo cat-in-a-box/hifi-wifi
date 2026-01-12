@@ -66,7 +66,14 @@ setup_steamos_build_env() {
     echo -e "${BLUE}Disabling read-only filesystem...${NC}"
     systemd-sysext unmerge 2>/dev/null || true
     steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-    sleep 2
+    sleep 1
+    
+    # Make holo pacmandb writable (SteamOS 3.5+ has separate overlay)
+    if [[ -d /usr/lib/holo/pacmandb ]]; then
+        echo -e "${BLUE}Making holo pacmandb writable...${NC}"
+        mount -o remount,rw /usr/lib/holo/pacmandb 2>/dev/null || true
+    fi
+    sleep 1
     
     # Verify writability
     if ! touch /usr/test-write 2>/dev/null; then
