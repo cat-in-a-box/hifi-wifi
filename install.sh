@@ -51,43 +51,89 @@ find_precompiled_binary() {
     fi
 }
 
-# Setup SteamOS build environment
-# Based on: https://gitlab.com/popsulfr/steam-deck-tricks
+# Setup Homebrew (works on SteamOS, persists across updates!)
+# Installs to /home/linuxbrew/.linuxbrew - doesn't touch rootfs
+setup_homebrew() {
+    local HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+    
+    # Check if already installed
+    if [[ -x "$HOMEBREW_PREFIX/bin/brew" ]]; then
+        echo -e "${GREEN}Homebrew already installed${NC}"
+        eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
+        return 0
+    fi
+    
+    echo -e "${BLUE}Installing Homebrew (one-time setup, persists across SteamOS updates)...${NC}"
+    echo -e "${YELLOW}This may take 5-10 minutes on first run.${NC}"
+    
+    # Homebrew needs to run as non-root user
+    if [[ $EUID -eq 0 ]] && [[ -n "$SUDO_USER" ]]; then
+        # Create linuxbrew directory with correct permissions
+        mkdir -p /home/linuxbrew
+        chown "$SUDO_USER:$SUDO_USER" /home/linuxbrew
+        
+        # Install as the real user (non-interactive)
+        sudo -u "$SUDO_USER" bash -c 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' || {
+            echo -e "${RED}Homebrew installation failed${NC}"
+            return 1
+        }
+    else
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
+            echo -e "${RED}Homebrew installation failed${NC}"
+            return 1
+        }
+    fi
+    
+    # Set up environment
+    eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
+    echo -e "${GREEN}Homebrew installed successfully${NC}"
+}
+
+# Install build dependencies via Homebrew
+setup_homebrew_build_deps() {
+    echo -e "${BLUE}Installing build dependencies via Homebrew...${NC}"
+    
+    local HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+    eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
+    
+    # Install gcc (includes everything needed for Rust compilation)
+    if [[ $EUID -eq 0 ]] && [[ -n "$SUDO_USER" ]]; then
+        sudo -u "$SUDO_USER" "$HOMEBREW_PREFIX/bin/brew" install gcc || {
+            echo -e "${RED}Failed to install gcc via Homebrew${NC}"
+            return 1
+        }
+    else
+        brew install gcc || {
+            echo -e "${RED}Failed to install gcc via Homebrew${NC}"
+            return 1
+        }
+    fi
+    
+    echo -e "${GREEN}Build dependencies ready!${NC}"
+}
+
+# Setup SteamOS build environment using Homebrew (persists across updates!)
 setup_steamos_build_env() {
-    echo -e "${BLUE}[SteamOS] Preparing build environment...${NC}"
+    echo -e "${BLUE}[SteamOS] Preparing build environment via Homebrew...${NC}"
+    echo -e "${YELLOW}Homebrew installs to home directory - survives SteamOS updates!${NC}\n"
     
-    # Require root
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}This script must be run as root on SteamOS for build setup.${NC}"
-        echo -e "Try: ${BLUE}sudo ./install.sh${NC}"
-        exit 1
-    fi
-    
-    # Disable read-only filesystem (the standard SteamOS way)
-    echo -e "${BLUE}Disabling read-only filesystem...${NC}"
-    steamos-readonly disable
-    
-    # SteamOS 3.5+ has holo pacmandb on separate overlay - make it writable
-    if mountpoint -q /usr/lib/holo/pacmandb 2>/dev/null; then
-        echo -e "${BLUE}Making holo pacmandb writable...${NC}"
-        mount -o remount,rw /usr/lib/holo/pacmandb
-    fi
-    
-    # Initialize and populate pacman keyrings
-    echo -e "${BLUE}Initializing pacman keyring...${NC}"
-    pacman-key --init
-    pacman-key --populate archlinux
-    pacman-key --populate holo
-    
-    # Install build dependencies
-    echo -e "${BLUE}Installing build tools...${NC}"
-    pacman -Sy --noconfirm --needed base-devel glibc linux-api-headers || {
-        echo -e "${RED}Package installation failed${NC}"
-        echo -e "${YELLOW}Note: Building from source on SteamOS is complex.${NC}"
+    # Homebrew approach - no root needed, persists across updates
+    setup_homebrew || {
+        echo -e "${RED}Failed to set up Homebrew${NC}"
         echo -e "${YELLOW}Consider using the pre-compiled release instead:${NC}"
         echo -e "${BLUE}https://github.com/doughty247/hifi-wifi/releases${NC}"
         exit 1
     }
+    
+    setup_homebrew_build_deps || {
+        echo -e "${RED}Failed to install build dependencies${NC}"
+        exit 1
+    }
+    
+    # Export Homebrew environment for the build
+    export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+    export CC="/home/linuxbrew/.linuxbrew/bin/gcc"
+    export CXX="/home/linuxbrew/.linuxbrew/bin/g++"
     
     echo -e "${GREEN}Build environment ready!${NC}\n"
 }
@@ -285,21 +331,26 @@ main() {
     else
         echo -e "${YELLOW}No pre-compiled binary found. Will build from source.${NC}\n"
         
-        # SteamOS warning
+        # SteamOS info - Homebrew makes this much easier now
         if [[ "$distro_id" == "steamos" ]]; then
-            echo -e "${YELLOW}WARNING: Building from source on SteamOS is complex.${NC}"
-            echo -e "${YELLOW}It's recommended to download the official release:${NC}"
+            echo -e "${YELLOW}NOTE: Building from source on SteamOS uses Homebrew.${NC}"
+            echo -e "${YELLOW}First-time setup takes ~10 minutes but persists across SteamOS updates.${NC}"
+            echo -e "${YELLOW}Alternatively, download the pre-compiled release:${NC}"
             echo -e "${BLUE}https://github.com/doughty247/hifi-wifi/releases${NC}\n"
-            read -p "Continue anyway? [y/N] " -n 1 -r
+            read -p "Continue with Homebrew build? [y/N] " -n 1 -r
             echo
             [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
         fi
         
-        # Step 2: Setup build environment (SteamOS only)
-        if [[ "$distro_id" == "steamos" || "$distro_id" == *"arch"* ]]; then
+        # Step 2: Setup build environment (SteamOS uses Homebrew, others use system packages)
+        if [[ "$distro_id" == "steamos" ]]; then
+            echo -e "${BLUE}[2/5] Setting up Homebrew build environment...${NC}"
+            setup_steamos_build_env
+        elif [[ "$distro_id" == *"arch"* ]]; then
             if ! command -v cc &>/dev/null; then
                 echo -e "${BLUE}[2/5] Setting up build environment...${NC}"
-                setup_steamos_build_env
+                # Arch but not SteamOS - use pacman directly
+                sudo pacman -Sy --noconfirm --needed base-devel
             else
                 echo -e "${BLUE}[2/5] Build tools already installed${NC}\n"
             fi
