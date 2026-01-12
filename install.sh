@@ -51,7 +51,8 @@ find_precompiled_binary() {
     fi
 }
 
-# Setup SteamOS build environment (disable readonly, install build tools)
+# Setup SteamOS build environment
+# Based on: https://gitlab.com/popsulfr/steam-deck-tricks
 setup_steamos_build_env() {
     echo -e "${BLUE}[SteamOS] Preparing build environment...${NC}"
     
@@ -62,68 +63,23 @@ setup_steamos_build_env() {
         exit 1
     fi
     
-    # Disable read-only filesystem
+    # Disable read-only filesystem (the standard SteamOS way)
     echo -e "${BLUE}Disabling read-only filesystem...${NC}"
-    systemd-sysext unmerge 2>/dev/null || true
-    steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-    sleep 1
+    steamos-readonly disable
     
-    # Make holo pacmandb writable (SteamOS 3.5+ has separate overlay)
-    if [[ -d /usr/lib/holo/pacmandb ]]; then
-        echo -e "${BLUE}Making holo pacmandb writable...${NC}"
-        mount -o remount,rw /usr/lib/holo/pacmandb 2>/dev/null || true
-    fi
-    sleep 1
-    
-    # Verify writability
-    if ! touch /usr/test-write 2>/dev/null; then
-        echo -e "${YELLOW}Retrying with aggressive unmerge...${NC}"
-        systemd-sysext unmerge 2>/dev/null || true
-        steamos-readonly disable 2>&1 | grep -v "Warning:" || true
-        sleep 2
-        
-        if ! touch /usr/test-write 2>/dev/null; then
-            echo -e "${RED}Filesystem is still read-only after multiple attempts.${NC}"
-            echo -e "${BLUE}Please reboot and try again, or download the pre-compiled release.${NC}"
-            exit 1
-        fi
-    fi
-    rm -f /usr/test-write
-    
-    # Always initialize pacman keyring on SteamOS (often broken after updates)
+    # Initialize and populate pacman keyrings
     echo -e "${BLUE}Initializing pacman keyring...${NC}"
-    pacman-key --init || {
-        echo -e "${RED}pacman-key --init failed${NC}"
-        exit 1
-    }
-    
-    # Populate keyrings - run separately, failures OK if already populated
-    echo -e "${BLUE}Populating pacman keys...${NC}"
-    pacman-key --populate archlinux || true
-    pacman-key --populate holo 2>/dev/null || true
-    
-    # Remove stale lock file if present
-    if [[ -f /var/lib/pacman/db.lck ]]; then
-        echo -e "${YELLOW}Removing stale pacman lock file...${NC}"
-        rm -f /var/lib/pacman/db.lck
-    fi
-    
-    # Sync package database (retry once on failure)
-    echo -e "${BLUE}Syncing package database...${NC}"
-    if ! pacman -Sy; then
-        echo -e "${YELLOW}First sync failed, retrying...${NC}"
-        sleep 2
-        pacman -Sy || {
-            echo -e "${RED}Package database sync failed${NC}"
-            echo -e "${YELLOW}Try: sudo rm /var/lib/pacman/db.lck && sudo pacman -Sy${NC}"
-            exit 1
-        }
-    fi
+    pacman-key --init
+    pacman-key --populate archlinux
+    pacman-key --populate holo
     
     # Install build dependencies
     echo -e "${BLUE}Installing build tools...${NC}"
-    pacman -S --noconfirm --needed base-devel glibc linux-api-headers || {
+    pacman -Sy --noconfirm --needed base-devel glibc linux-api-headers || {
         echo -e "${RED}Package installation failed${NC}"
+        echo -e "${YELLOW}Note: Building from source on SteamOS is complex.${NC}"
+        echo -e "${YELLOW}Consider using the pre-compiled release instead:${NC}"
+        echo -e "${BLUE}https://github.com/doughty247/hifi-wifi/releases${NC}"
         exit 1
     }
     
