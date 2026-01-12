@@ -67,6 +67,12 @@ setup_steamos_build_env() {
     echo -e "${BLUE}Disabling read-only filesystem...${NC}"
     steamos-readonly disable
     
+    # SteamOS 3.5+ has holo pacmandb on separate overlay - make it writable
+    if mountpoint -q /usr/lib/holo/pacmandb 2>/dev/null; then
+        echo -e "${BLUE}Making holo pacmandb writable...${NC}"
+        mount -o remount,rw /usr/lib/holo/pacmandb
+    fi
+    
     # Initialize and populate pacman keyrings
     echo -e "${BLUE}Initializing pacman keyring...${NC}"
     pacman-key --init
