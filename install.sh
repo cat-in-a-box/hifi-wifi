@@ -176,8 +176,19 @@ setup_steamos_build_env() {
     gcc_paths=$(find_homebrew_gcc)
     local gcc_bin="${gcc_paths%%:*}"
     local gxx_bin="${gcc_paths##*:}"
+    local HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
     
-    export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+    # Create cc/c++ symlinks - Rust's cc crate looks for 'cc' not $CC
+    if [[ ! -e "$HOMEBREW_PREFIX/bin/cc" ]]; then
+        echo -e "${BLUE}Creating cc symlink...${NC}"
+        ln -sf "$gcc_bin" "$HOMEBREW_PREFIX/bin/cc"
+    fi
+    if [[ ! -e "$HOMEBREW_PREFIX/bin/c++" ]]; then
+        echo -e "${BLUE}Creating c++ symlink...${NC}"
+        ln -sf "$gxx_bin" "$HOMEBREW_PREFIX/bin/c++"
+    fi
+    
+    export PATH="$HOMEBREW_PREFIX/bin:$PATH"
     export CC="$gcc_bin"
     export CXX="$gxx_bin"
     
