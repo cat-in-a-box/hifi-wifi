@@ -45,6 +45,8 @@ enum Commands {
     Off,
     /// Start service and apply optimizations (for A/B testing)
     On,
+    /// Bootstrap: Check and repair system service (runs on boot via user timer)
+    Bootstrap,
 }
 
 #[tokio::main]
@@ -96,6 +98,9 @@ async fn main() -> Result<()> {
         }
         Commands::On => {
             run_on()?;
+        }
+        Commands::Bootstrap => {
+            run_bootstrap()?;
         }
     }
 
@@ -829,6 +834,120 @@ WantedBy=multi-user.target
     // Create CLI symlink for user convenience
     ensure_symlinks();
     
+    // Install user-level bootstrap timer (survives SteamOS updates!)
+    // This runs on every login and repairs the system service if missing
+    install_bootstrap_timer()?;
+    
+    Ok(())
+}
+
+/// Install user-level systemd timer that persists across SteamOS updates
+/// This timer runs bootstrap on every login to repair the system service if wiped
+fn install_bootstrap_timer() -> Result<()> {
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::process::Command;
+    use std::path::PathBuf;
+    
+    // Get the actual user's home directory (not root's)
+    // During install, we're running as root via sudo, but need the real user's home
+    let home = std::env::var("SUDO_USER")
+        .ok()
+        .and_then(|user| {
+            // Get home dir for the sudo user
+            Command::new("getent")
+                .args(["passwd", &user])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let line = String::from_utf8_lossy(&output.stdout);
+                    line.split(':').nth(5).map(|s| PathBuf::from(s.trim()))
+                })
+        })
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/home/deck"));
+    
+    let user_systemd_dir = home.join(".config/systemd/user");
+    
+    info!("Installing bootstrap timer in {}", user_systemd_dir.display());
+    
+    // Create user systemd directory
+    fs::create_dir_all(&user_systemd_dir)?;
+    
+    // Create bootstrap service (runs with sudo)
+    let service_content = r#"[Unit]
+Description=hifi-wifi Bootstrap (repairs system service after updates)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sudo /var/lib/hifi-wifi/hifi-wifi bootstrap
+# Silent on success, only show errors
+StandardOutput=null
+StandardError=journal
+"#;
+    
+    let service_path = user_systemd_dir.join("hifi-wifi-bootstrap.service");
+    let mut service_file = File::create(&service_path)?;
+    service_file.write_all(service_content.as_bytes())?;
+    
+    // Create bootstrap timer (runs on login and every 6 hours)
+    let timer_content = r#"[Unit]
+Description=hifi-wifi Bootstrap Timer (auto-repairs after SteamOS updates)
+
+[Timer]
+# Run shortly after login
+OnStartupSec=10s
+# Also run periodically in case system updates while logged in
+OnUnitActiveSec=6h
+# Spread out timing to reduce boot load
+RandomizedDelaySec=5s
+
+[Install]
+WantedBy=timers.target
+"#;
+    
+    let timer_path = user_systemd_dir.join("hifi-wifi-bootstrap.timer");
+    let mut timer_file = File::create(&timer_path)?;
+    timer_file.write_all(timer_content.as_bytes())?;
+    
+    // Fix ownership if running as sudo
+    if let Ok(sudo_uid) = std::env::var("SUDO_UID") {
+        if let Ok(sudo_gid) = std::env::var("SUDO_GID") {
+            if let (Ok(uid), Ok(gid)) = (sudo_uid.parse::<u32>(), sudo_gid.parse::<u32>()) {
+                // Use chown to fix ownership
+                let _ = Command::new("chown")
+                    .args(["-R", &format!("{}:{}", uid, gid), user_systemd_dir.to_str().unwrap()])
+                    .output();
+            }
+        }
+    }
+    
+    // Enable the timer for the user
+    // Need to run as the actual user, not root
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        info!("Enabling bootstrap timer for user {}", sudo_user);
+        
+        // Use machinectl to run systemctl as the user
+        let enable_result = Command::new("sudo")
+            .args(["-u", &sudo_user, "systemctl", "--user", "daemon-reload"])
+            .output();
+        
+        if enable_result.is_ok() {
+            let _ = Command::new("sudo")
+                .args(["-u", &sudo_user, "systemctl", "--user", "enable", "hifi-wifi-bootstrap.timer"])
+                .output();
+            let _ = Command::new("sudo")
+                .args(["-u", &sudo_user, "systemctl", "--user", "start", "hifi-wifi-bootstrap.timer"])
+                .output();
+        }
+        
+        info!("Bootstrap timer installed - will auto-repair after SteamOS updates");
+    } else {
+        warn!("Could not detect user for timer installation");
+        warn!("Manually enable with: systemctl --user enable --now hifi-wifi-bootstrap.timer");
+    }
+    
     Ok(())
 }
 
@@ -836,6 +955,7 @@ WantedBy=multi-user.target
 fn run_uninstall() -> Result<()> {
     use std::fs;
     use std::process::Command;
+    use std::path::PathBuf;
     
     info!("=== Uninstalling hifi-wifi Service ===\n");
 
@@ -849,6 +969,43 @@ fn run_uninstall() -> Result<()> {
     if std::path::Path::new(service_path).exists() {
         info!("Removing service file...");
         fs::remove_file(service_path)?;
+    }
+
+    // Remove bootstrap timer (user-level)
+    let home = std::env::var("SUDO_USER")
+        .ok()
+        .and_then(|user| {
+            Command::new("getent")
+                .args(["passwd", &user])
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let line = String::from_utf8_lossy(&output.stdout);
+                    line.split(':').nth(5).map(|s| PathBuf::from(s.trim()))
+                })
+        })
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/home/deck"));
+    
+    let user_systemd_dir = home.join(".config/systemd/user");
+    let timer_path = user_systemd_dir.join("hifi-wifi-bootstrap.timer");
+    let service_path_user = user_systemd_dir.join("hifi-wifi-bootstrap.service");
+    
+    if timer_path.exists() || service_path_user.exists() {
+        info!("Removing bootstrap timer...");
+        
+        // Stop and disable timer for user
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            let _ = Command::new("sudo")
+                .args(["-u", &sudo_user, "systemctl", "--user", "stop", "hifi-wifi-bootstrap.timer"])
+                .output();
+            let _ = Command::new("sudo")
+                .args(["-u", &sudo_user, "systemctl", "--user", "disable", "hifi-wifi-bootstrap.timer"])
+                .output();
+        }
+        
+        let _ = fs::remove_file(&timer_path);
+        let _ = fs::remove_file(&service_path_user);
     }
 
     // Reload systemd
@@ -910,5 +1067,108 @@ fn run_on() -> Result<()> {
     info!("\n=== hifi-wifi is ON ===");
     info!("Network optimizations are active.");
     info!("Check status: hifi-wifi status");
+    Ok(())
+}
+
+/// Bootstrap: Check if system service exists and repair if missing
+/// This is called by the user-level timer on every login to survive SteamOS updates
+fn run_bootstrap() -> Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+    use std::process::Command;
+    use std::path::Path;
+    
+    let service_path = Path::new("/etc/systemd/system/hifi-wifi.service");
+    let binary_path = Path::new("/var/lib/hifi-wifi/hifi-wifi");
+    let symlink_path = Path::new("/usr/local/bin/hifi-wifi");
+    
+    // Check if binary exists (if not, nothing we can do)
+    if !binary_path.exists() {
+        warn!("Bootstrap: Binary not found at {}, skipping", binary_path.display());
+        return Ok(());
+    }
+    
+    let mut repaired = false;
+    
+    // Check if service file exists
+    if !service_path.exists() {
+        info!("Bootstrap: Service file missing (likely after SteamOS update), recreating...");
+        
+        // On SteamOS, need to disable read-only first
+        let steamos = is_steamos();
+        if steamos {
+            let _ = Command::new("systemd-sysext").arg("unmerge").output();
+            let _ = Command::new("steamos-readonly").arg("disable").output();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        
+        // Recreate service file
+        let service_content = r#"[Unit]
+Description=hifi-wifi Network Optimizer
+Documentation=https://github.com/doughty247/hifi-wifi
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/var/lib/hifi-wifi/hifi-wifi monitor
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=false
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+# Resource limits
+MemoryMax=64M
+CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        
+        if let Ok(mut file) = File::create(service_path) {
+            let _ = file.write_all(service_content.as_bytes());
+            repaired = true;
+            info!("Bootstrap: Service file recreated");
+        } else {
+            error!("Bootstrap: Failed to create service file");
+        }
+        
+        // Re-enable read-only on SteamOS
+        if steamos {
+            let _ = Command::new("steamos-readonly").arg("enable").output();
+        }
+    }
+    
+    // Check/repair symlink
+    if !symlink_path.exists() {
+        info!("Bootstrap: CLI symlink missing, recreating...");
+        ensure_symlinks();
+        repaired = true;
+    }
+    
+    // If we repaired the service, reload and start it
+    if repaired {
+        info!("Bootstrap: Reloading systemd and starting service...");
+        let _ = Command::new("systemctl").args(["daemon-reload"]).output();
+        let _ = Command::new("systemctl").args(["enable", "hifi-wifi.service"]).output();
+        let _ = Command::new("systemctl").args(["start", "hifi-wifi.service"]).output();
+        info!("Bootstrap: Repair complete - hifi-wifi service restored");
+    } else {
+        // Just ensure service is running
+        let status = Command::new("systemctl")
+            .args(["is-active", "--quiet", "hifi-wifi.service"])
+            .status();
+        
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            info!("Bootstrap: Service not running, starting...");
+            let _ = Command::new("systemctl").args(["start", "hifi-wifi.service"]).output();
+        }
+    }
+    
     Ok(())
 }
