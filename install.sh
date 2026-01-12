@@ -97,19 +97,20 @@ setup_homebrew_build_deps() {
     eval "$($HOMEBREW_PREFIX/bin/brew shellenv)"
     
     # Install gcc (includes everything needed for Rust compilation)
+    # Note: brew install may return non-zero for post-install warnings, so we verify gcc works
     if [[ $EUID -eq 0 ]] && [[ -n "$SUDO_USER" ]]; then
-        sudo -u "$SUDO_USER" "$HOMEBREW_PREFIX/bin/brew" install gcc || {
-            echo -e "${RED}Failed to install gcc via Homebrew${NC}"
-            return 1
-        }
+        sudo -u "$SUDO_USER" "$HOMEBREW_PREFIX/bin/brew" install gcc || true
     else
-        brew install gcc || {
-            echo -e "${RED}Failed to install gcc via Homebrew${NC}"
-            return 1
-        }
+        brew install gcc || true
     fi
     
-    echo -e "${GREEN}Build dependencies ready!${NC}"
+    # Verify GCC actually works (more reliable than exit code)
+    if [[ -x "$HOMEBREW_PREFIX/bin/gcc" ]] && "$HOMEBREW_PREFIX/bin/gcc" --version &>/dev/null; then
+        echo -e "${GREEN}Build dependencies ready!${NC}"
+    else
+        echo -e "${RED}Failed to install gcc via Homebrew${NC}"
+        return 1
+    fi
 }
 
 # Setup SteamOS build environment using Homebrew (persists across updates!)
