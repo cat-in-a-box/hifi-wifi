@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================================
-# hifi-wifi v3.0 Installer - Refactored for clarity and maintainability
+# hifi-wifi v3.0.0-beta2 Installer
 # ============================================================================
 
 # Colors
@@ -12,7 +12,7 @@ readonly YELLOW='\033[1;33m'
 readonly RED='\033[0;31m'
 readonly NC='\033[0m'
 
-echo -e "${BLUE}=== hifi-wifi v3.0 Installer ===${NC}\n"
+echo -e "${BLUE}=== hifi-wifi v3.0.0-beta2 Installer ===${NC}\n"
 
 # ============================================================================
 # Helper Functions
@@ -318,7 +318,7 @@ apply_optimizations() {
 
 # Offer reboot
 offer_reboot() {
-    echo -e "${GREEN}Success! hifi-wifi v3.0 is installed and active.${NC}\n"
+    echo -e "${GREEN}Success! hifi-wifi v3.0.0-beta2 is installed and active.${NC}\n"
     echo -e "  Check status:    ${BLUE}hifi-wifi status${NC}"
     echo -e "  Live monitoring: ${BLUE}sudo hifi-wifi monitor${NC}"
     echo -e "  Service logs:    ${BLUE}journalctl -u hifi-wifi -f${NC}\n"
@@ -388,16 +388,26 @@ main() {
     else
         echo -e "${YELLOW}No pre-compiled binary found. Will build from source.${NC}\n"
         
-        # SteamOS info - Homebrew makes this much easier now
+        # Pre-release warning for source builds
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║              ⚠️  PRE-RELEASE SOFTWARE WARNING  ⚠️              ║${NC}"
+        echo -e "${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${YELLOW}║  This is hifi-wifi v3.0.0-beta2 - a TESTING release.         ║${NC}"
+        echo -e "${YELLOW}║                                                              ║${NC}"
+        echo -e "${YELLOW}║  • NOT recommended for production use                        ║${NC}"
+        echo -e "${YELLOW}║  • May contain bugs or unexpected behavior                   ║${NC}"
+        echo -e "${YELLOW}║  • Intended for testing and feedback purposes only           ║${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}\n"
+        
+        # SteamOS-specific: Homebrew build info
         if [[ "$distro_id" == "steamos" ]]; then
-            echo -e "${YELLOW}NOTE: Building from source on SteamOS uses Homebrew.${NC}"
-            echo -e "${YELLOW}First-time setup takes ~10 minutes but persists across SteamOS updates.${NC}"
-            echo -e "${YELLOW}Alternatively, download the pre-compiled release:${NC}"
-            echo -e "${BLUE}https://github.com/doughty247/hifi-wifi/releases${NC}\n"
-            read -p "Continue with Homebrew build? [y/N] " -n 1 -r
-            echo
-            [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+            echo -e "${BLUE}SteamOS Build Info:${NC} First-time setup uses Homebrew (~10 min)."
+            echo -e "Build environment persists across SteamOS updates.\n"
         fi
+        
+        read -p "I understand this is pre-release software for testing only. Continue? [y/N] " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
         
         # Step 2: Setup build environment (SteamOS uses Homebrew, others use system packages)
         if [[ "$distro_id" == "steamos" ]]; then
