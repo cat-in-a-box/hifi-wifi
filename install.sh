@@ -83,14 +83,12 @@ setup_steamos_build_env() {
     fi
     rm -f /usr/test-write
     
-    # Initialize pacman keyring if needed
-    if [[ ! -f /etc/pacman.d/gnupg/trustdb.gpg ]]; then
-        echo -e "${BLUE}Initializing pacman keyring...${NC}"
-        pacman-key --init || {
-            echo -e "${RED}pacman-key --init failed${NC}"
-            exit 1
-        }
-    fi
+    # Always initialize pacman keyring on SteamOS (often broken after updates)
+    echo -e "${BLUE}Initializing pacman keyring...${NC}"
+    pacman-key --init || {
+        echo -e "${RED}pacman-key --init failed${NC}"
+        exit 1
+    }
     
     # Populate keyrings - run separately, failures OK if already populated
     echo -e "${BLUE}Populating pacman keys...${NC}"
