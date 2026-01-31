@@ -16,7 +16,7 @@ use std::sync::mpsc::channel;
 use tokio::time;
 use notify::{Watcher, RecursiveMode, Config as NotifyConfig, RecommendedWatcher, Event, EventKind};
 
-use crate::config::structs::{GovernorConfig, WifiConfig};
+use crate::config::structs::{GovernorConfig, PowerConfig, WifiConfig};
 use crate::network::nm::NmClient;
 use crate::network::tc::{TcManager, EthtoolManager};
 use crate::network::stats::PpsMonitor;
@@ -95,6 +95,7 @@ impl InterfaceState {
 pub struct Governor {
     config: GovernorConfig,
     wifi_config: WifiConfig,
+    power_config: PowerConfig,
     nm_client: NmClient,
     cpu_monitor: CpuMonitor,
     power_manager: PowerManager,
@@ -104,15 +105,16 @@ pub struct Governor {
 
 impl Governor {
     /// Create a new Governor with the given configuration
-    pub async fn new(config: GovernorConfig, wifi_config: WifiConfig) -> Result<Self> {
+    pub async fn new(config: GovernorConfig, wifi_config: WifiConfig, power_config: PowerConfig) -> Result<Self> {
         let nm_client = NmClient::new().await?;
         let cpu_monitor = CpuMonitor::new(config.cpu_avg_window_size);
         let power_manager = PowerManager::new();
         let wifi_manager = WifiManager::new()?;
-        
+
         Ok(Self {
             config,
             wifi_config,
+            power_config,
             nm_client,
             cpu_monitor,
             power_manager,
@@ -190,14 +192,15 @@ impl Governor {
     /// Handle a connection event (WiFi reconnect)
     /// Per roadmap-beta2.md: Clear cache, wait for link stability, re-optimize
     async fn handle_connection_event(&mut self) {
-        // Clear all cached bitrates - they're stale after reconnection
+        // Clear all cached state - stale after reconnection
         for (interface, state) in &mut self.interface_states {
             if state.last_good_bitrate.is_some() {
-                info!("Clearing cached bitrate for {} (was {:?} Kbit/s)", 
+                info!("Clearing cached bitrate for {} (was {:?} Kbit/s)",
                       interface, state.last_good_bitrate);
             }
             state.last_good_bitrate = None;
             state.bandwidth_valid = false;
+            state.power_save_enabled = None; // Force re-apply on next tick
         }
         
         // Wait 1 second for link to stabilize (per legacy dispatcher behavior)
@@ -406,62 +409,97 @@ impl Governor {
                 }
             }
 
-            // 5b. Power Save Management (Adaptive) - with hysteresis to prevent flapping
-            // FIXED: Also disable power save during ANY network activity, not just game mode
+            // 5b. Power Save Management - respects config mode
+            // "off"/"on" = user override (skip adaptive logic entirely)
+            // "adaptive" = original hysteresis logic based on AC/battery/activity
             {
-                let base_should_enable = self.power_manager.should_enable_power_save();
-                
-                if let Some(state) = self.interface_states.get_mut(&interface) {
-                    // Check for active network usage (PPS > 50 = meaningful traffic)
-                    let pps = state.pps_monitor.sample(&interface);
-                    let has_network_activity = pps > 50;
-                    
-                    let in_game = state.game_mode_until
-                        .map(|until| Instant::now() < until)
-                        .unwrap_or(false);
-                    
-                    // Disable power save if:
-                    // 1. On AC power, OR
-                    // 2. Game mode active, OR  
-                    // 3. Any significant network activity (>50 PPS)
-                    let should_enable = base_should_enable && !in_game && !has_network_activity;
-                    
-                    // Hysteresis: require 3 stable ticks before changing power save
-                    // This prevents AC/battery flapping from causing jitter
-                    if state.power_save_enabled != Some(should_enable) {
-                        if state.pending_power_save == Some(should_enable) {
-                            state.power_save_stable_ticks += 1;
-                        } else {
-                            state.pending_power_save = Some(should_enable);
-                            state.power_save_stable_ticks = 1;
-                        }
-                        
-                        // Apply after 3 stable ticks (6 seconds) to avoid brief AC disconnects
-                        if state.power_save_stable_ticks >= 3 {
-                            let wifi_interfaces = self.wifi_manager.interfaces();
-                            if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
-                                if should_enable {
-                                    if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
-                                        info!("Power save ENABLED on {} (battery, idle)", interface);
-                                        state.power_save_enabled = Some(true);
-                                    }
-                                } else {
+                let power_mode = self.power_config.wlan_power_save.as_str();
+
+                match power_mode {
+                    "off" => {
+                        // User wants power save permanently off — never call enable_power_save
+                        if let Some(state) = self.interface_states.get_mut(&interface) {
+                            if state.power_save_enabled != Some(false) {
+                                let wifi_interfaces = self.wifi_manager.interfaces();
+                                if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
                                     if let Ok(_) = self.wifi_manager.disable_power_save(wifi_ifc) {
-                                        let reason = if !base_should_enable { "AC power" }
-                                            else if in_game { "game mode" }
-                                            else { "network activity" };
-                                        info!("Power save DISABLED on {} ({})", interface, reason);
+                                        info!("Power save forced OFF on {} (config override)", interface);
                                         state.power_save_enabled = Some(false);
                                     }
                                 }
                             }
-                            state.pending_power_save = None;
-                            state.power_save_stable_ticks = 0;
                         }
-                    } else {
-                        // State matches, reset pending
-                        state.pending_power_save = None;
-                        state.power_save_stable_ticks = 0;
+                    }
+                    "on" => {
+                        // User wants power save permanently on — never call disable_power_save
+                        if let Some(state) = self.interface_states.get_mut(&interface) {
+                            if state.power_save_enabled != Some(true) {
+                                let wifi_interfaces = self.wifi_manager.interfaces();
+                                if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
+                                    if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
+                                        info!("Power save forced ON on {} (config override)", interface);
+                                        state.power_save_enabled = Some(true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // "adaptive" — original hysteresis logic, unchanged
+                        let base_should_enable = self.power_manager.should_enable_power_save();
+
+                        if let Some(state) = self.interface_states.get_mut(&interface) {
+                            let pps = state.pps_monitor.sample(&interface);
+                            let has_network_activity = pps > 50;
+
+                            let in_game = state.game_mode_until
+                                .map(|until| Instant::now() < until)
+                                .unwrap_or(false);
+
+                            // Disable power save if:
+                            // 1. On AC power, OR
+                            // 2. Game mode active, OR
+                            // 3. Any significant network activity (>50 PPS)
+                            let should_enable = base_should_enable && !in_game && !has_network_activity;
+
+                            // Hysteresis: require 3 stable ticks before changing power save
+                            // This prevents AC/battery flapping from causing jitter
+                            if state.power_save_enabled != Some(should_enable) {
+                                if state.pending_power_save == Some(should_enable) {
+                                    state.power_save_stable_ticks += 1;
+                                } else {
+                                    state.pending_power_save = Some(should_enable);
+                                    state.power_save_stable_ticks = 1;
+                                }
+
+                                // Apply after 3 stable ticks (6 seconds) to avoid brief AC disconnects
+                                if state.power_save_stable_ticks >= 3 {
+                                    let wifi_interfaces = self.wifi_manager.interfaces();
+                                    if let Some(wifi_ifc) = wifi_interfaces.iter().find(|i| i.name == interface) {
+                                        if should_enable {
+                                            if let Ok(_) = self.wifi_manager.enable_power_save(wifi_ifc) {
+                                                info!("Power save ENABLED on {} (battery, idle)", interface);
+                                                state.power_save_enabled = Some(true);
+                                            }
+                                        } else {
+                                            if let Ok(_) = self.wifi_manager.disable_power_save(wifi_ifc) {
+                                                let reason = if !base_should_enable { "AC power" }
+                                                    else if in_game { "game mode" }
+                                                    else { "network activity" };
+                                                info!("Power save DISABLED on {} ({})", interface, reason);
+                                                state.power_save_enabled = Some(false);
+                                            }
+                                        }
+                                    }
+                                    state.pending_power_save = None;
+                                    state.power_save_stable_ticks = 0;
+                                }
+                            } else {
+                                // State matches, reset pending
+                                state.pending_power_save = None;
+                                state.power_save_stable_ticks = 0;
+                            }
+                        }
                     }
                 }
             }

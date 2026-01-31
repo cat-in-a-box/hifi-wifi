@@ -48,7 +48,10 @@ hifi-wifi runs automatically in the background. You don't need to do anything.
 
 | Command | Description |
 |---------|-------------|
-| `hifi-wifi status` | Check if it's working ||
+| `hifi-wifi status` | Check if it's working |
+| `sudo hifi-wifi power-save off` | Maximum WiFi performance (persists across sleep/reboot) |
+| `sudo hifi-wifi power-save adaptive` | Automatic power save based on AC/battery (default) |
+| `hifi-wifi power-save status` | Show current power save mode and actual state |
 | `sudo hifi-wifi on/off` | Start/stop the service |
 | `sudo hifi-wifi uninstall` | Remove completely |
 
@@ -74,6 +77,20 @@ Works on any Linux system with NetworkManager and systemd.
 ## Configuration (Optional)
 
 hifi-wifi works great with default settings. Advanced users can customize:
+
+### WiFi Power Save
+
+By default, hifi-wifi uses **adaptive** power save (off on AC, on when on battery). If you experience WiFi issues on Steam Deck (stuttering, disconnects, slow speeds), force it off:
+
+```bash
+sudo hifi-wifi power-save off
+```
+
+This persists across sleep, reboot, and SteamOS updates. To revert to automatic mode:
+
+```bash
+sudo hifi-wifi power-save adaptive
+```
 
 **Config File:** `/etc/hifi-wifi/config.toml` (created on first run)
 

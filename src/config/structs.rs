@@ -73,12 +73,17 @@ impl Default for WifiConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PowerConfig {
     #[allow(dead_code)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_adaptive")]
     pub wlan_power_save: String, // "on", "off", "adaptive"
 }
+
+fn default_true() -> bool { true }
+fn default_adaptive() -> String { "adaptive".to_string() }
 
 impl Default for PowerConfig {
     fn default() -> Self {
