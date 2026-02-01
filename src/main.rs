@@ -53,6 +53,12 @@ enum Commands {
         /// Mode: off (best performance), on (battery saving), adaptive (automatic), status (show current)
         mode: String,
     },
+    /// Control background scan suppression (on/off/status)
+    #[command(name = "scan-suppress")]
+    ScanSuppress {
+        /// Mode: on (suppress scans for lowest latency), off (allow scans for roaming), status (show current)
+        mode: String,
+    },
 }
 
 #[tokio::main]
@@ -63,7 +69,8 @@ async fn main() -> Result<()> {
 
     // Suppress INFO logs for status-like commands (clean output)
     let is_status_cmd = matches!(cli.command, Some(Commands::Status))
-        || matches!(cli.command, Some(Commands::PowerSave { ref mode }) if mode == "status");
+        || matches!(cli.command, Some(Commands::PowerSave { ref mode }) if mode == "status")
+        || matches!(cli.command, Some(Commands::ScanSuppress { ref mode }) if mode == "status");
     if is_status_cmd {
         log::set_max_level(log::LevelFilter::Warn);
     }
@@ -112,6 +119,9 @@ async fn main() -> Result<()> {
         }
         Commands::PowerSave { mode } => {
             run_power_save(&mode, &config)?;
+        }
+        Commands::ScanSuppress { mode } => {
+            run_scan_suppress(&mode, &config)?;
         }
     }
 
@@ -576,7 +586,13 @@ async fn run_status_async() -> Result<()> {
     println!("{}│{}  Governor: {}", BLUE, NC, gov_status);
     println!("{}│{}    ├─ QoS Mode:   {}", BLUE, NC, if config.governor.breathing_cake_enabled { "Breathing CAKE (Dynamic)" } else { "Static CAKE" });
     println!("{}│{}    ├─ Game Mode:  {}", BLUE, NC, if config.governor.game_mode_enabled { "Available (PPS > 200)" } else { "Disabled" });
-    println!("{}│{}    └─ Band Steer: {}", BLUE, NC, if config.governor.band_steering_enabled { "Available" } else { "Disabled" });
+    println!("{}│{}    ├─ Band Steer: {}", BLUE, NC, if config.governor.band_steering_enabled { "Available" } else { "Disabled" });
+    let scan_suppress_desc = if config.governor.scan_suppress {
+        format!("{}[ON]{} (Lowest Latency)", GREEN, NC)
+    } else {
+        format!("{}[OFF]{} (Roaming Enabled)", YELLOW, NC)
+    };
+    println!("{}│{}    └─ Scan Suppress: {}", BLUE, NC, scan_suppress_desc);
 
     println!("{}└{}", BLUE, NC);
     println!();
@@ -1610,6 +1626,166 @@ fn run_power_save(mode: &str, config: &config::structs::Config) -> Result<()> {
             std::process::exit(1);
         }
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Scan Suppression Control
+// ============================================================================
+
+/// Control background scan suppression
+fn run_scan_suppress(mode: &str, config: &config::structs::Config) -> Result<()> {
+    use std::process::Command;
+
+    // ANSI Colors
+    const GREEN: &str = "\x1b[0;32m";
+    const YELLOW: &str = "\x1b[0;33m";
+    const BLUE: &str = "\x1b[0;34m";
+    const BOLD: &str = "\x1b[1m";
+    const NC: &str = "\x1b[0m";
+
+    match mode {
+        "status" => {
+            println!();
+            println!("{}{}Scan Suppression Status{}", BOLD, BLUE, NC);
+            println!("{}──────────────────────────{}", BLUE, NC);
+
+            let configured = config.governor.scan_suppress;
+            let mode_display = if configured {
+                format!("{}ON{} (Background scans suppressed — lowest latency)", GREEN, NC)
+            } else {
+                format!("{}OFF{} (Background scans allowed — roaming enabled)", YELLOW, NC)
+            };
+            println!("  Config: {}", mode_display);
+
+            // Check if service is running
+            let service_active = Command::new("systemctl")
+                .args(["is-active", "--quiet", "hifi-wifi.service"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if service_active {
+                println!("  Service: {}Running{} (scan suppress {})",
+                    GREEN, NC,
+                    if configured { "active" } else { "inactive" });
+            } else {
+                println!("  Service: {}Not running{}", YELLOW, NC);
+            }
+
+            // Show current scan state via iw
+            let wifi_mgr = WifiManager::new_quiet()?;
+            for ifc in wifi_mgr.interfaces() {
+                if ifc.interface_type != crate::network::wifi::InterfaceType::Wifi {
+                    continue;
+                }
+                // Quick test: trigger scan abort and check if scan was active
+                let scan_out = Command::new("iw")
+                    .args(["dev", &ifc.name, "scan", "abort"])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                    .unwrap_or_default();
+
+                let scan_state = if scan_out.contains("No such") {
+                    "no active scan"
+                } else {
+                    "scan aborted (was in progress)"
+                };
+                println!("  {}: {}", ifc.name, scan_state);
+            }
+            println!();
+        }
+        "on" | "off" => {
+            let enable = mode == "on";
+            let desc = if enable {
+                "ON (suppress background scans — lowest latency, disables roaming)"
+            } else {
+                "OFF (allow background scans — roaming enabled)"
+            };
+            info!("Setting scan suppression to: {}", desc);
+
+            // Update config file
+            write_scan_suppress_config(enable)?;
+
+            // Restart service if running so Governor picks up the new config
+            let service_running = Command::new("systemctl")
+                .args(["is-active", "--quiet", "hifi-wifi.service"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if service_running {
+                info!("Restarting hifi-wifi service to apply new config...");
+                let _ = Command::new("systemctl").args(["restart", "hifi-wifi.service"]).output();
+            }
+
+            info!("Scan suppression set to '{}' successfully", mode);
+        }
+        _ => {
+            error!("Invalid mode: '{}'. Use: on, off, or status", mode);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Write the scan_suppress setting to the hifi-wifi config file
+fn write_scan_suppress_config(enable: bool) -> Result<()> {
+    use std::fs::{self, File};
+    use std::io::Write;
+
+    let config_dir = std::path::Path::new("/etc/hifi-wifi");
+    fs::create_dir_all(config_dir)?;
+
+    let existing = fs::read_to_string(HIFI_CONFIG_PATH).unwrap_or_default();
+    let value_str = if enable { "true" } else { "false" };
+
+    let new_content = if existing.contains("[governor]") {
+        let mut result = String::new();
+        let mut in_governor_section = false;
+        let mut replaced = false;
+        for line in existing.lines() {
+            if line.trim() == "[governor]" {
+                in_governor_section = true;
+                result.push_str(line);
+                result.push('\n');
+            } else if line.trim().starts_with('[') {
+                if in_governor_section && !replaced {
+                    result.push_str(&format!("scan_suppress = {}\n", value_str));
+                    replaced = true;
+                }
+                in_governor_section = false;
+                result.push_str(line);
+                result.push('\n');
+            } else if in_governor_section && line.trim().starts_with("scan_suppress") {
+                result.push_str(&format!("scan_suppress = {}", value_str));
+                result.push('\n');
+                replaced = true;
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        if in_governor_section && !replaced {
+            result.push_str(&format!("scan_suppress = {}", value_str));
+            result.push('\n');
+        }
+        result
+    } else {
+        let mut result = existing;
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&format!("\n[governor]\nscan_suppress = {}\n", value_str));
+        result
+    };
+
+    let mut file = File::create(HIFI_CONFIG_PATH)?;
+    file.write_all(new_content.as_bytes())?;
+    info!("Updated config: {} (scan_suppress = {})", HIFI_CONFIG_PATH, value_str);
 
     Ok(())
 }

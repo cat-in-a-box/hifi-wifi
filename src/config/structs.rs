@@ -163,6 +163,13 @@ pub struct GovernorConfig {
     
     /// Rolling average window size for CPU monitoring
     pub cpu_avg_window_size: usize,
+
+    /// Suppress iwd background scans to eliminate latency spikes
+    /// When true (default), the Governor aborts background scans every 500ms
+    /// while connected, reducing latency from ~20ms avg/170ms max to ~3.5ms avg/4ms max.
+    /// Disables roaming and band steering while active (scans resume if disconnected).
+    #[serde(default = "default_true")]
+    pub scan_suppress: bool,
 }
 
 impl Default for GovernorConfig {
@@ -188,6 +195,8 @@ impl Default for GovernorConfig {
             cpu_coalescing_threshold: 0.90,
             
             cpu_avg_window_size: 3,
+
+            scan_suppress: true,
         }
     }
 }
