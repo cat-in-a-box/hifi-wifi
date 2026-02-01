@@ -9,6 +9,7 @@ hifi-wifi automatically optimizes your network for gaming - no configuration nee
 ## What It Does
 
 - **Eliminates stuttering** during online gaming and game streaming
+- **Suppresses latency spikes** caused by background WiFi scanning (170ms → 4ms)
 - **Picks the fastest WiFi** automatically (prefers 5GHz/6GHz over 2.4GHz)
 - **Reduces lag** with intelligent traffic shaping (CAKE qdisc)
 - **Saves battery** on Steam Deck while maintaining performance
@@ -52,6 +53,9 @@ hifi-wifi runs automatically in the background. You don't need to do anything.
 | `sudo hifi-wifi power-save off` | Maximum WiFi performance (persists across sleep/reboot) |
 | `sudo hifi-wifi power-save adaptive` | Automatic power save based on AC/battery (default) |
 | `hifi-wifi power-save status` | Show current power save mode and actual state |
+| `sudo hifi-wifi scan-suppress on` | Suppress background scans for lowest latency (default) |
+| `sudo hifi-wifi scan-suppress off` | Allow background scans (enables roaming) |
+| `hifi-wifi scan-suppress status` | Show current scan suppression state |
 | `sudo hifi-wifi on/off` | Start/stop the service |
 | `sudo hifi-wifi uninstall` | Remove completely |
 
@@ -92,6 +96,22 @@ This persists across sleep, reboot, and SteamOS updates. To revert to automatic 
 sudo hifi-wifi power-save adaptive
 ```
 
+### Scan Suppression
+
+WiFi drivers perform background channel scans every ~15 seconds, causing **170ms latency spikes** that affect gaming and streaming. hifi-wifi suppresses these scans by default, reducing latency to **~3.5ms average / 4ms max**.
+
+The tradeoff: with scan suppression on, WiFi roaming between access points is disabled. For most users (single AP, fixed location), this is the right default. If you have multiple access points and need roaming:
+
+```bash
+sudo hifi-wifi scan-suppress off
+```
+
+To re-enable (recommended for gaming):
+
+```bash
+sudo hifi-wifi scan-suppress on
+```
+
 **Config File:** `/etc/hifi-wifi/config.toml` (created on first run)
 
 ---
@@ -120,7 +140,7 @@ Then install normally.
 
 ## How It Works
 
-hifi-wifi uses the CAKE traffic shaper to manage network congestion, monitors your connection quality, and adjusts settings in real-time. It detects WiFi reconnections, roaming events, and power state changes to keep optimizations current.
+hifi-wifi uses the CAKE traffic shaper to manage network congestion, suppresses latency-causing background WiFi scans, monitors your connection quality, and adjusts settings in real-time. It detects WiFi reconnections, roaming events, and power state changes to keep optimizations current.
 
 **[Read the full architecture documentation →](ARCHITECTURE.md)**
 

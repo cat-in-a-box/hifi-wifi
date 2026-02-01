@@ -10,9 +10,11 @@
 use anyhow::Result;
 use log::{info, debug, warn};
 use std::time::{Duration, Instant};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::path::Path;
 use std::sync::mpsc::channel;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::time;
 use notify::{Watcher, RecursiveMode, Config as NotifyConfig, RecommendedWatcher, Event, EventKind};
 
@@ -101,6 +103,8 @@ pub struct Governor {
     power_manager: PowerManager,
     wifi_manager: WifiManager,
     interface_states: std::collections::HashMap<String, InterfaceState>,
+    /// Shared flag: when true, the scan abort task actively suppresses background scans
+    scan_suppress_active: Arc<AtomicBool>,
 }
 
 impl Governor {
@@ -120,6 +124,7 @@ impl Governor {
             power_manager,
             wifi_manager,
             interface_states: std::collections::HashMap::new(),
+            scan_suppress_active: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -128,7 +133,18 @@ impl Governor {
     /// Per roadmap-beta2.md: Watch for connection events via inotify
     pub async fn run(&mut self, tick_rate_secs: u64) -> Result<()> {
         info!("Governor starting (tick rate: {}s)", tick_rate_secs);
-        
+
+        // Spawn scan suppression task if enabled
+        if self.config.scan_suppress {
+            let flag = self.scan_suppress_active.clone();
+            tokio::spawn(async move {
+                scan_abort_task(flag).await;
+            });
+            info!("Scan suppression task started (500ms interval)");
+        } else {
+            info!("Scan suppression disabled by config");
+        }
+
         // Setup inotify watcher for connection events
         let (event_tx, event_rx) = channel();
         let watcher_result = self.setup_connection_watcher(event_tx);
@@ -142,9 +158,9 @@ impl Governor {
                 None
             }
         };
-        
+
         let mut interval = time::interval(Duration::from_secs(tick_rate_secs));
-        
+
         loop {
             // Check for connection events (non-blocking)
             while let Ok(event) = event_rx.try_recv() {
@@ -229,6 +245,12 @@ impl Governor {
             .filter(|d| d.state == crate::network::nm::DeviceState::Activated)
             .map(|d| (d.interface.clone(), d.path.clone(), d.bitrate, d.active_ap.clone()))
             .collect();
+
+        // Update scan suppression flag: suppress when connected, allow when disconnected
+        if self.config.scan_suppress {
+            let has_wifi_connection = !device_infos.is_empty();
+            self.scan_suppress_active.store(has_wifi_connection, Ordering::Relaxed);
+        }
 
         for (interface, path, bitrate, active_ap) in device_infos {
             info!("Processing interface: {}, active_ap: {:?}, band_steering_enabled: {}", 
@@ -564,7 +586,8 @@ impl Governor {
             }
 
             // 6. Smart Band Steering
-            if self.config.band_steering_enabled {
+            // Skip when scan suppress is active — scan results are stale/empty
+            if self.config.band_steering_enabled && !self.scan_suppress_active.load(Ordering::Relaxed) {
                 if let Some(current_ap) = &active_ap {
                     let hysteresis_ticks = self.config.roam_hysteresis_ticks;
                     
@@ -792,4 +815,60 @@ impl Governor {
         state.last_tx_bytes = tx_bytes;
         state.last_stats_time = Some(now);
     }
+}
+
+/// Background task that aborts iwd's background scans every 500ms.
+///
+/// iwd initiates a full-channel scan cycle every ~15 seconds (5.8s of off-channel time)
+/// that causes 150-175ms latency spikes. By aborting these scans before the radio leaves
+/// the home channel for the 5GHz+6GHz sweep, latency drops from ~20ms avg / 170ms max
+/// to ~3.5ms avg / 4ms max.
+///
+/// The abort command is a no-op when no scan is in progress (returns ENOENT, harmless).
+/// Only aborts when the flag is set (interface is connected). When disconnected, scans
+/// are allowed so reconnection can proceed.
+async fn scan_abort_task(active: Arc<AtomicBool>) {
+    let mut interval = time::interval(Duration::from_millis(500));
+
+    loop {
+        interval.tick().await;
+
+        if !active.load(Ordering::Relaxed) {
+            continue;
+        }
+
+        // Find connected WiFi interfaces and abort their scans
+        let interfaces = find_wifi_interfaces();
+        for ifc in &interfaces {
+            let _ = Command::new("iw")
+                .args(["dev", ifc, "scan", "abort"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output();
+        }
+    }
+}
+
+/// Find WiFi interfaces that are currently connected (operstate "up").
+/// Reads from /sys/class/net to avoid any D-Bus overhead.
+fn find_wifi_interfaces() -> Vec<String> {
+    let mut result = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Check if it's a wireless interface
+            let wireless_path = format!("/sys/class/net/{}/wireless", name);
+            if !Path::new(&wireless_path).exists() {
+                continue;
+            }
+            // Check if it's up (connected)
+            let operstate_path = format!("/sys/class/net/{}/operstate", name);
+            if let Ok(state) = std::fs::read_to_string(&operstate_path) {
+                if state.trim() == "up" {
+                    result.push(name);
+                }
+            }
+        }
+    }
+    result
 }
