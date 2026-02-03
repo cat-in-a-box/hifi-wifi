@@ -2,6 +2,7 @@ mod network;
 mod system;
 mod config;
 mod utils;
+mod firmware;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -59,6 +60,11 @@ enum Commands {
         /// Mode: on (suppress scans for lowest latency), off (allow scans for roaming), status (show current)
         mode: String,
     },
+    /// Manage WiFi firmware updates (Steam Deck OLED only)
+    Firmware {
+        #[command(subcommand)]
+        action: firmware::FirmwareAction,
+    },
 }
 
 #[tokio::main]
@@ -70,7 +76,8 @@ async fn main() -> Result<()> {
     // Suppress INFO logs for status-like commands (clean output)
     let is_status_cmd = matches!(cli.command, Some(Commands::Status))
         || matches!(cli.command, Some(Commands::PowerSave { ref mode }) if mode == "status")
-        || matches!(cli.command, Some(Commands::ScanSuppress { ref mode }) if mode == "status");
+        || matches!(cli.command, Some(Commands::ScanSuppress { ref mode }) if mode == "status")
+        || matches!(cli.command, Some(Commands::Firmware { action: firmware::FirmwareAction::Status { .. } }));
     if is_status_cmd {
         log::set_max_level(log::LevelFilter::Warn);
     }
@@ -122,6 +129,9 @@ async fn main() -> Result<()> {
         }
         Commands::ScanSuppress { mode } => {
             run_scan_suppress(&mode, &config)?;
+        }
+        Commands::Firmware { action } => {
+            firmware::run_firmware(action, cli.dry_run)?;
         }
     }
 
