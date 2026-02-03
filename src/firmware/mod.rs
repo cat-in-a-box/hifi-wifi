@@ -17,7 +17,7 @@ use clap::Subcommand;
 
 use crate::firmware::device::DeviceInfo;
 use crate::firmware::version::{FirmwareVersion, get_upstream_version};
-use crate::firmware::deploy::{BackupManager, FirmwareDeployer};
+use crate::firmware::deploy::{BackupManager, FirmwareDeployer, is_steamos, disable_readonly, enable_readonly};
 use crate::firmware::download::FirmwareDownloader;
 
 /// Firmware subcommands
@@ -307,37 +307,58 @@ fn run_update(force: bool, dry_run: bool) -> Result<()> {
     println!();
     println!("{}[4/5]{} Managing backup...", DIM, NC);
 
-    let backup_mgr = BackupManager::new(&firmware_path);
-    if !backup_mgr.backup_files_exist() {
-        // First update - create backup
-        if !current.is_valve_stock() && !force {
-            println!();
-            println!("{}Warning:{} Current firmware is not Valve stock.", YELLOW, NC);
-            println!("  Current: {}", current.version_string);
-            println!("  Expected: CI_WLAN.HSP.1.1-... (Valve prefix)");
-            println!();
-            println!("Creating backup of current (modified) state. To restore true Valve");
-            println!("stock firmware, use SteamOS recovery or reinstall.");
-            println!();
-
-            if !confirm("Continue with backup and update?")? {
-                bail!("Update cancelled by user.");
-            }
-        }
-
-        backup_mgr.create_backup(&current)?;
-        println!("  Backup created {}✓{}", GREEN, NC);
-    } else {
-        println!("  Backup already exists {}✓{}", GREEN, NC);
+    // Handle SteamOS readonly filesystem for backup and deploy
+    let steamos = is_steamos();
+    if steamos {
+        disable_readonly()?;
     }
 
-    // Phase 4: Deploy
-    println!();
-    println!("{}[5/5]{} Deploying firmware...", DIM, NC);
+    // Use a closure to ensure we re-enable readonly even on error
+    let result = (|| -> Result<()> {
+        let backup_mgr = BackupManager::new(&firmware_path);
+        if !backup_mgr.backup_files_exist() {
+            // First update - create backup
+            if !current.is_valve_stock() && !force {
+                println!();
+                println!("{}Warning:{} Current firmware is not Valve stock.", YELLOW, NC);
+                println!("  Current: {}", current.version_string);
+                println!("  Expected: CI_WLAN.HSP.1.1-... (Valve prefix)");
+                println!();
+                println!("Creating backup of current (modified) state. To restore true Valve");
+                println!("stock firmware, use SteamOS recovery or reinstall.");
+                println!();
 
-    let deployer = FirmwareDeployer::new(&firmware_path);
-    deployer.deploy(&staging_dir)?;
-    println!("  Firmware deployed {}✓{}", GREEN, NC);
+                if !confirm("Continue with backup and update?")? {
+                    bail!("Update cancelled by user.");
+                }
+            }
+
+            backup_mgr.create_backup(&current)?;
+            println!("  Backup created {}✓{}", GREEN, NC);
+        } else {
+            println!("  Backup already exists {}✓{}", GREEN, NC);
+        }
+
+        // Phase 4: Deploy
+        println!();
+        println!("{}[5/5]{} Deploying firmware...", DIM, NC);
+
+        let deployer = FirmwareDeployer::new(&firmware_path);
+        deployer.deploy(&staging_dir)?;
+        println!("  Firmware deployed {}✓{}", GREEN, NC);
+
+        Ok(())
+    })();
+
+    // Re-enable readonly regardless of success/failure
+    if steamos {
+        if let Err(e) = enable_readonly() {
+            eprintln!("{}Warning:{} Failed to re-enable readonly: {}", YELLOW, NC, e);
+        }
+    }
+
+    // Propagate any error from the update process
+    result?;
 
     // Verify
     let new_version = FirmwareVersion::from_installed(&firmware_path)?;
@@ -352,6 +373,14 @@ fn run_update(force: bool, dry_run: bool) -> Result<()> {
     println!("  Current:  {}", new_version.version_string);
     println!();
     println!("{}⚠ Reboot required to load new firmware.{}", YELLOW, NC);
+    println!();
+
+    if confirm("Reboot now?")? {
+        println!("Rebooting...");
+        std::process::Command::new("reboot")
+            .status()
+            .context("Failed to reboot")?;
+    }
 
     Ok(())
 }
@@ -463,6 +492,14 @@ fn run_revert(force: bool, dry_run: bool) -> Result<()> {
     println!("  Current:  {}", new_version.version_string);
     println!();
     println!("{}⚠ Reboot required to load restored firmware.{}", YELLOW, NC);
+    println!();
+
+    if confirm("Reboot now?")? {
+        println!("Rebooting...");
+        std::process::Command::new("reboot")
+            .status()
+            .context("Failed to reboot")?;
+    }
 
     Ok(())
 }
