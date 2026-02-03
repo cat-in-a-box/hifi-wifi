@@ -345,7 +345,7 @@ fn compress_file(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Check if running on SteamOS
-fn is_steamos() -> bool {
+pub fn is_steamos() -> bool {
     if let Ok(content) = fs::read_to_string("/etc/os-release") {
         content.contains("ID=steamos")
     } else {
@@ -354,7 +354,7 @@ fn is_steamos() -> bool {
 }
 
 /// Disable SteamOS readonly filesystem
-fn disable_readonly() -> Result<()> {
+pub fn disable_readonly() -> Result<()> {
     // Check if steamos-readonly command exists
     if !Path::new("/usr/bin/steamos-readonly").exists() {
         return Ok(());  // Not SteamOS or command not available
@@ -377,7 +377,7 @@ fn disable_readonly() -> Result<()> {
 }
 
 /// Enable SteamOS readonly filesystem
-fn enable_readonly() -> Result<()> {
+pub fn enable_readonly() -> Result<()> {
     if !Path::new("/usr/bin/steamos-readonly").exists() {
         return Ok(());
     }

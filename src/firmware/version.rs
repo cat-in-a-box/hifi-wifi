@@ -148,17 +148,17 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Downloads the amss.bin file header to extract the version string
 pub fn get_upstream_version() -> Result<FirmwareVersion> {
     // We could parse the WHENCE file, but it doesn't contain version strings.
-    // Instead, we'll fetch just enough of amss.bin to extract the version.
-    // The version string is typically within the first 1MB of the file.
+    // Instead, we'll fetch enough of amss.bin to extract the version.
+    // The version string is located around 2-3MB into the file.
 
     let url = "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/ath11k/QCA2066/hw2.1/amss.bin";
 
-    // Use system curl to fetch partial file (first 1MB should contain version)
+    // Use system curl to fetch partial file (first 4MB to ensure we get version string)
     let output = Command::new("curl")
         .args([
             "-sfL",                         // silent, fail on error, follow redirects
-            "--range", "0-1048575",         // First 1MB
-            "--max-time", "30",             // 30 second timeout
+            "--range", "0-4194303",         // First 4MB
+            "--max-time", "60",             // 60 second timeout for larger download
             url,
         ])
         .output()

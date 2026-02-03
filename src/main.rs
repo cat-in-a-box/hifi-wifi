@@ -415,6 +415,25 @@ async fn run_status_async() -> Result<()> {
     println!("{}│{}  Device: {:?}", BLUE, NC, power_mgr.device_type());
     let bat_pct = power_mgr.battery_percentage().map(|p| format!("{}%", p)).unwrap_or("N/A".to_string());
     println!("{}│{}  Power:  {:?} (Battery: {})", BLUE, NC, power_mgr.power_source(), bat_pct);
+
+    // Firmware info
+    if let Ok(fw_path) = crate::firmware::version::detect_firmware_path() {
+        if let Ok(fw_ver) = crate::firmware::version::FirmwareVersion::from_installed(&fw_path) {
+            let fw_type = if fw_ver.is_valve_stock() {
+                format!("{}(Valve stock){}", DIM, NC)
+            } else {
+                format!("{}(upstream){}", DIM, NC)
+            };
+            // Truncate version string for display
+            let ver_short = if fw_ver.version_string.len() > 40 {
+                format!("{}...", &fw_ver.version_string[..37])
+            } else {
+                fw_ver.version_string.clone()
+            };
+            println!("{}│{}  Network Card Firmware: {} {}", BLUE, NC, ver_short, fw_type);
+        }
+    }
+
     println!("{}└{}", BLUE, NC);
     println!();
 
