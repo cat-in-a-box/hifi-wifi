@@ -12,7 +12,7 @@ pub mod version;
 pub mod download;
 pub mod deploy;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, Context};
 use clap::Subcommand;
 
 use crate::firmware::device::DeviceInfo;
